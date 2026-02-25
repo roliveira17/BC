@@ -47,6 +47,32 @@ CREATE TABLE IF NOT EXISTS fetch_log (
     row_count  INTEGER NOT NULL,
     PRIMARY KEY (ano_mes, relatorio)
 );
+
+CREATE TABLE IF NOT EXISTS balancetes_raw (
+    ano_mes    INTEGER NOT NULL,
+    cnpj       VARCHAR NOT NULL,
+    cnpj8      VARCHAR NOT NULL,
+    nome_inst  VARCHAR NOT NULL,
+    atributo   VARCHAR NOT NULL,
+    documento  VARCHAR NOT NULL,
+    conta      VARCHAR NOT NULL,
+    nome_conta VARCHAR NOT NULL,
+    saldo      DOUBLE NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_bal_raw_lookup
+    ON balancetes_raw (ano_mes, conta, cnpj8);
+
+CREATE TABLE IF NOT EXISTS balancetes_top50 (
+    ano_mes            INTEGER NOT NULL,
+    rank               INTEGER NOT NULL,
+    cnpj8              VARCHAR NOT NULL,
+    nome_inst          VARCHAR NOT NULL,
+    cod_conglomerado   INTEGER,
+    nome_conglomerado  VARCHAR,
+    patrimonio_liquido DOUBLE NOT NULL,
+    PRIMARY KEY (ano_mes, rank)
+);
 """
 
 

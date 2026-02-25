@@ -6,7 +6,7 @@ import duckdb
 import polars as pl
 import structlog
 
-from src.models import InstitutionRecord, ReportValue
+from src.models import BalanceteRow, InstitutionRecord, ReportValue
 
 logger = structlog.get_logger()
 
@@ -139,4 +139,89 @@ def ingest_report_values(
     logger.info(
         "ingested_report", ano_mes=ano_mes, relatorio=relatorio, rows=len(rows)
     )
+    return len(rows)
+
+
+def _compute_and_insert_top50(
+    con: duckdb.DuckDBPyConnection, ano_mes: int
+) -> int:
+    """Compute Top 50 by PL from balancetes_raw and insert into balancetes_top50.
+
+    Uses COSIF account 6.0.0.00.00-2 (Patrimônio Líquido).
+    LEFT JOINs cadastro to resolve cod_conglomerado via CNPJ8 bridge.
+    Returns row count inserted.
+    """
+    con.execute("DELETE FROM balancetes_top50 WHERE ano_mes = ?", [ano_mes])
+
+    sql = """
+        INSERT INTO balancetes_top50
+        WITH pl_by_inst AS (
+            SELECT cnpj8, nome_inst, SUM(saldo) AS patrimonio_liquido
+            FROM balancetes_raw
+            WHERE ano_mes = ?
+              AND conta = '6.0.0.00.00-2'
+            GROUP BY cnpj8, nome_inst
+        ),
+        ranked AS (
+            SELECT
+                ROW_NUMBER() OVER (ORDER BY patrimonio_liquido DESC) AS rank,
+                p.cnpj8, p.nome_inst, p.patrimonio_liquido,
+                c.cod_conglomerado, c.nome_conglomerado
+            FROM pl_by_inst p
+            LEFT JOIN (
+                SELECT DISTINCT cnpj, cod_conglomerado, nome_conglomerado
+                FROM cadastro
+                WHERE ano_mes = (SELECT MAX(ano_mes) FROM cadastro)
+            ) c ON SUBSTRING(c.cnpj, 1, 8) = p.cnpj8
+        )
+        SELECT ?, rank, cnpj8, nome_inst, cod_conglomerado,
+               nome_conglomerado, patrimonio_liquido
+        FROM ranked
+        WHERE rank <= 50
+        ORDER BY rank
+    """
+    con.execute(sql, [ano_mes, ano_mes])
+    result = con.execute(
+        "SELECT COUNT(*) FROM balancetes_top50 WHERE ano_mes = ?", [ano_mes]
+    ).fetchone()
+    count = result[0] if result else 0
+    logger.info("computed_top50", ano_mes=ano_mes, rows=count)
+    return count
+
+
+def ingest_balancetes(
+    con: duckdb.DuckDBPyConnection,
+    records: list[BalanceteRow],
+    ano_mes: int,
+) -> int:
+    """Insert balancete rows into DuckDB and compute Top 50. Returns raw row count."""
+    if not records:
+        return 0
+    rows = [
+        {
+            "ano_mes": r.ano_mes,
+            "cnpj": r.cnpj,
+            "cnpj8": r.cnpj8,
+            "nome_inst": r.nome_inst,
+            "atributo": r.atributo,
+            "documento": r.documento,
+            "conta": r.conta,
+            "nome_conta": r.nome_conta,
+            "saldo": r.saldo,
+        }
+        for r in records
+    ]
+    df = pl.DataFrame(rows)  # noqa: F841 — referenced by DuckDB SQL
+
+    con.execute("DELETE FROM balancetes_raw WHERE ano_mes = ?", [ano_mes])
+    con.execute("INSERT INTO balancetes_raw SELECT * FROM df")
+
+    _compute_and_insert_top50(con, ano_mes)
+
+    con.execute(
+        "INSERT OR REPLACE INTO fetch_log (ano_mes, relatorio, row_count) "
+        "VALUES (?, ?, ?)",
+        [ano_mes, "balancetes", len(rows)],
+    )
+    logger.info("ingested_balancetes", ano_mes=ano_mes, rows=len(rows))
     return len(rows)

@@ -3,6 +3,11 @@ from __future__ import annotations
 import duckdb
 import polars as pl
 
+# COSIF account codes for balancetes
+COSIF_PATRIMONIO_LIQUIDO = "6.0.0.00.00-2"
+COSIF_ATIVO_TOTAL = "1.0.0.00.00-7"
+COSIF_RESULTADO_LIQUIDO = "7.0.0.00.00-9"
+
 
 def list_institutions(
     con: duckdb.DuckDBPyConnection,
@@ -200,3 +205,55 @@ def get_dre_indicators(
         ORDER BY ano_mes, ordenacao
     """
     return con.execute(sql, [cod_conglomerado]).pl()
+
+
+def get_balancetes_top50(
+    con: duckdb.DuckDBPyConnection,
+    ano_mes: int | None = None,
+) -> pl.DataFrame:
+    """Return Top 50 institutions by Patrimônio Líquido for a given period.
+
+    If ano_mes is None, uses the most recent available period.
+    Returns: DataFrame [ano_mes, rank, cnpj8, nome_inst, cod_conglomerado,
+                        nome_conglomerado, patrimonio_liquido]
+    """
+    params: list[int] = []
+    if ano_mes is not None:
+        period_clause = "ano_mes = ?"
+        params.append(ano_mes)
+    else:
+        period_clause = "ano_mes = (SELECT MAX(ano_mes) FROM balancetes_top50)"
+
+    sql = f"""
+        SELECT ano_mes, rank, cnpj8, nome_inst, cod_conglomerado,
+               nome_conglomerado, patrimonio_liquido
+        FROM balancetes_top50
+        WHERE {period_clause}
+        ORDER BY rank
+    """
+    return con.execute(sql, params).pl()
+
+
+def get_balancetes_trend(
+    con: duckdb.DuckDBPyConnection,
+    cnpj8: str,
+) -> pl.DataFrame:
+    """Return PL trend over time for a single institution (by cnpj8).
+
+    Returns: DataFrame [ano_mes, patrimonio_liquido]
+    """
+    sql = """
+        SELECT ano_mes, patrimonio_liquido
+        FROM balancetes_top50
+        WHERE cnpj8 = ?
+        ORDER BY ano_mes
+    """
+    return con.execute(sql, [cnpj8]).pl()
+
+
+def list_balancetes_periods(con: duckdb.DuckDBPyConnection) -> list[int]:
+    """Return all AAAAMM periods with balancetes data, descending."""
+    result = con.execute(
+        "SELECT DISTINCT ano_mes FROM balancetes_top50 ORDER BY ano_mes DESC"
+    ).fetchall()
+    return [row[0] for row in result]

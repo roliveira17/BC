@@ -4,11 +4,12 @@ import duckdb
 
 from src.ingest import (
     generate_quarter_periods,
+    ingest_balancetes,
     ingest_cadastro,
     ingest_report_values,
     is_period_fetched,
 )
-from src.models import InstitutionRecord, ReportValue
+from src.models import BalanceteRow, InstitutionRecord, ReportValue
 
 
 def _make_institution(
@@ -143,3 +144,102 @@ class TestIngestReportValues:
         ).fetchone()
         assert log_row is not None
         assert log_row[0] == 2
+
+
+def _make_balancete_row(
+    cnpj: str = "00000000000100",
+    conta: str = "6.0.0.00.00-2",
+    saldo: float = 1000000.0,
+    nome_inst: str = "BANCO TEST SA",
+    ano_mes: int = 202501,
+) -> BalanceteRow:
+    return BalanceteRow(
+        ano_mes=ano_mes,
+        cnpj=cnpj,
+        cnpj8=cnpj[:8],
+        nome_inst=nome_inst,
+        atributo="A",
+        documento="4040",
+        conta=conta,
+        nome_conta="Patrimonio Liquido",
+        saldo=saldo,
+    )
+
+
+class TestIngestBalancetes:
+    def test_inserts_raw_records(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        records = [_make_balancete_row(), _make_balancete_row(cnpj="11111111000100")]
+        count = ingest_balancetes(db_con, records, 202501)
+        assert count == 2
+
+        rows = db_con.execute(
+            "SELECT COUNT(*) FROM balancetes_raw WHERE ano_mes = 202501"
+        ).fetchone()
+        assert rows is not None
+        assert rows[0] == 2
+
+    def test_is_idempotent(self, db_con: duckdb.DuckDBPyConnection) -> None:
+        records = [_make_balancete_row()]
+        ingest_balancetes(db_con, records, 202501)
+        ingest_balancetes(db_con, records, 202501)
+
+        rows = db_con.execute(
+            "SELECT COUNT(*) FROM balancetes_raw WHERE ano_mes = 202501"
+        ).fetchone()
+        assert rows is not None
+        assert rows[0] == 1
+
+    def test_computes_top50(self, db_con: duckdb.DuckDBPyConnection) -> None:
+        records = [
+            _make_balancete_row(cnpj="11111111000100", saldo=5000000.0),
+            _make_balancete_row(cnpj="22222222000100", saldo=3000000.0),
+            _make_balancete_row(cnpj="33333333000100", saldo=1000000.0),
+        ]
+        ingest_balancetes(db_con, records, 202501)
+
+        top50 = db_con.execute(
+            "SELECT * FROM balancetes_top50 WHERE ano_mes = 202501 ORDER BY rank"
+        ).fetchall()
+        assert len(top50) == 3
+        # Rank 1 should have the highest PL
+        assert top50[0][6] > top50[1][6]  # patrimonio_liquido column
+
+    def test_updates_fetch_log(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        records = [_make_balancete_row()]
+        ingest_balancetes(db_con, records, 202501)
+
+        log_row = db_con.execute(
+            "SELECT row_count FROM fetch_log "
+            "WHERE ano_mes = 202501 AND relatorio = 'balancetes'"
+        ).fetchone()
+        assert log_row is not None
+        assert log_row[0] == 1
+
+    def test_empty_records_returns_zero(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        count = ingest_balancetes(db_con, [], 202501)
+        assert count == 0
+
+    def test_bridge_join_resolves_conglomerado(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        # First seed cadastro so the bridge join works
+        cadastro = [_make_institution(cod_conglomerado=99, cod_inst=10)]
+        ingest_cadastro(db_con, cadastro, 202501)
+
+        # Now ingest balancete with matching CNPJ8
+        records = [_make_balancete_row(cnpj="00000000000100", saldo=5000000.0)]
+        ingest_balancetes(db_con, records, 202501)
+
+        top50 = db_con.execute(
+            "SELECT cod_conglomerado, nome_conglomerado "
+            "FROM balancetes_top50 WHERE ano_mes = 202501"
+        ).fetchall()
+        assert len(top50) == 1
+        assert top50[0][0] == 99
+        assert top50[0][1] == "BANCO TEST"
