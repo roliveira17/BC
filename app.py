@@ -1,0 +1,128 @@
+from __future__ import annotations
+
+import dash
+from dash import Dash, Input, Output, dcc, html
+
+from src.db import get_connection
+from src.log import configure_logging
+from src.queries import list_institutions
+from src.settings import Settings
+
+configure_logging()
+settings = Settings()
+
+con = get_connection(settings.duckdb_path)
+
+app = Dash(
+    __name__,
+    use_pages=True,
+    suppress_callback_exceptions=True,
+    title="BCB Prudential Dashboard",
+)
+
+SEGMENTS = [
+    {"label": "Todos", "value": "ALL"},
+    {"label": "S1 - Porte >= 10%", "value": "S1"},
+    {"label": "S2 - Porte >= 1%", "value": "S2"},
+    {"label": "S3 - Porte >= 0.1%", "value": "S3"},
+    {"label": "S4 - Porte < 0.1%", "value": "S4"},
+    {"label": "S5 - Não bancário", "value": "S5"},
+]
+
+app.layout = html.Div(
+    [
+        # Header
+        html.Div(
+            [
+                html.H1(
+                    "Dashboard Prudencial BCB",
+                    style={"margin": "0", "fontSize": "24px"},
+                ),
+                html.P(
+                    "Indicadores de instituições financeiras — IF.data",
+                    style={"margin": "0", "color": "#666", "fontSize": "14px"},
+                ),
+            ],
+            style={"padding": "16px 24px", "borderBottom": "1px solid #ddd"},
+        ),
+        # Navigation + segment filter
+        html.Div(
+            [
+                html.Nav(
+                    [
+                        dcc.Link(
+                            "Análise Individual",
+                            href="/",
+                            style={
+                                "marginRight": "24px",
+                                "fontWeight": "bold",
+                                "textDecoration": "none",
+                            },
+                        ),
+                        dcc.Link(
+                            "Comparação",
+                            href="/comparison",
+                            style={
+                                "fontWeight": "bold",
+                                "textDecoration": "none",
+                            },
+                        ),
+                    ],
+                    style={"display": "inline-block", "verticalAlign": "middle"},
+                ),
+                html.Div(
+                    [
+                        html.Label(
+                            "Segmento: ",
+                            style={"fontWeight": "bold", "marginRight": "8px"},
+                        ),
+                        dcc.Dropdown(
+                            id="segment-filter",
+                            options=SEGMENTS,
+                            value="ALL",
+                            clearable=False,
+                            style={"width": "200px", "display": "inline-block"},
+                        ),
+                    ],
+                    style={
+                        "display": "inline-block",
+                        "marginLeft": "48px",
+                        "verticalAlign": "middle",
+                    },
+                ),
+            ],
+            style={"padding": "12px 24px", "borderBottom": "1px solid #eee"},
+        ),
+        # Shared store for institution options
+        dcc.Store(id="institution-options-store"),
+        # Page content
+        html.Div(
+            dash.page_container,
+            style={"padding": "24px"},
+        ),
+    ],
+    style={"fontFamily": "Arial, sans-serif"},
+)
+
+
+@app.callback(
+    Output("institution-options-store", "data"),
+    Input("segment-filter", "value"),
+)
+def update_institution_options(segmento: str) -> list[dict[str, str | int]]:
+    """Update institution options whenever segment filter changes."""
+    df = list_institutions(con, segmento=segmento if segmento != "ALL" else None)
+    if df.is_empty():
+        return []
+    return [
+        {"label": row[1], "value": row[0]}
+        for row in df.iter_rows()
+    ]
+
+
+if __name__ == "__main__":
+    app.run(
+        debug=settings.dash_debug,
+        host=settings.dash_host,
+        port=settings.dash_port,
+    )
