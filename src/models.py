@@ -73,6 +73,44 @@ class DataNotFoundError(IFDataError):
         super().__init__(f"No data available for period {ano_mes}")
 
 
+# --- Balancetes 4040 Models ---
+
+
+class BalanceteRow(BaseModel):  # type: ignore[misc]
+    """Single parsed row from a balancete CSV (filtered to Documento=4040)."""
+
+    ano_mes: int
+    cnpj: str
+    cnpj8: str
+    nome_inst: str
+    atributo: str
+    documento: str
+    conta: str
+    nome_conta: str
+    saldo: float
+
+
+class BalancetesError(Exception):
+    """Base error for balancetes operations."""
+
+
+class ZipDownloadError(BalancetesError):
+    """Failed to download balancete ZIP file."""
+
+    def __init__(self, url: str, status_code: int) -> None:
+        self.url = url
+        self.status_code = status_code
+        super().__init__(f"Download failed for {url}: HTTP {status_code}")
+
+
+class ZipNotAvailableError(BalancetesError):
+    """Balancete ZIP not yet published (404)."""
+
+    def __init__(self, ano_mes: int) -> None:
+        self.ano_mes = ano_mes
+        super().__init__(f"Balancete not available for period {ano_mes}")
+
+
 # --- Domain Types ---
 
 

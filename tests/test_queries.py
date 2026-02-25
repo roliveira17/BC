@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import duckdb
 
-from src.ingest import ingest_cadastro, ingest_report_values
-from src.models import InstitutionRecord, ReportValue
+from src.ingest import ingest_balancetes, ingest_cadastro, ingest_report_values
+from src.models import BalanceteRow, InstitutionRecord, ReportValue
 from src.queries import (
     compare_institutions,
     get_available_indicators,
     get_available_periods,
+    get_balancetes_top50,
+    get_balancetes_trend,
     get_capital_indicators,
     get_segment_ranking,
     get_summary_indicators,
+    list_balancetes_periods,
     list_institutions,
 )
 
@@ -198,3 +201,91 @@ class TestAvailableIndicators:
         indicators = get_available_indicators(db_con, "5")
         assert "Indice de Basileia" in indicators
         assert "Patrimonio de Referencia" in indicators
+
+
+# --- Balancetes Query Tests ---
+
+
+def _balancete_row(
+    cnpj: str = "00000000000100",
+    saldo: float = 1000000.0,
+    conta: str = "6.0.0.00.00-2",
+    ano_mes: int = 202501,
+) -> BalanceteRow:
+    return BalanceteRow(
+        ano_mes=ano_mes,
+        cnpj=cnpj,
+        cnpj8=cnpj[:8],
+        nome_inst=f"BANCO {cnpj[:8]}",
+        atributo="A",
+        documento="4040",
+        conta=conta,
+        nome_conta="Patrimonio Liquido",
+        saldo=saldo,
+    )
+
+
+def _seed_balancetes(con: duckdb.DuckDBPyConnection) -> None:
+    """Seed balancetes test data: 3 institutions, 2 periods."""
+    for ano_mes in [202501, 202502]:
+        rows = [
+            _balancete_row(cnpj="11111111000100", saldo=5000000.0, ano_mes=ano_mes),
+            _balancete_row(cnpj="22222222000100", saldo=3000000.0, ano_mes=ano_mes),
+            _balancete_row(cnpj="33333333000100", saldo=1000000.0, ano_mes=ano_mes),
+        ]
+        ingest_balancetes(con, rows, ano_mes)
+
+
+class TestBalancetesTop50:
+    def test_returns_ranked_data(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        _seed_balancetes(db_con)
+        result = get_balancetes_top50(db_con, 202501)
+        assert result.shape[0] == 3
+        pls = result["patrimonio_liquido"].to_list()
+        assert pls[0] >= pls[1] >= pls[2]
+
+    def test_uses_latest_period_when_none(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        _seed_balancetes(db_con)
+        result = get_balancetes_top50(db_con)
+        assert result.shape[0] == 3
+        assert result["ano_mes"][0] == 202502
+
+    def test_empty_when_no_data(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        result = get_balancetes_top50(db_con, 202501)
+        assert result.shape[0] == 0
+
+
+class TestBalancetesTrend:
+    def test_returns_trend_for_institution(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        _seed_balancetes(db_con)
+        result = get_balancetes_trend(db_con, "11111111")
+        assert result.shape[0] == 2
+        assert "patrimonio_liquido" in result.columns
+
+    def test_empty_for_unknown_cnpj8(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        _seed_balancetes(db_con)
+        result = get_balancetes_trend(db_con, "99999999")
+        assert result.shape[0] == 0
+
+
+class TestBalancetesPeriods:
+    def test_returns_periods_descending(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        _seed_balancetes(db_con)
+        periods = list_balancetes_periods(db_con)
+        assert periods == [202502, 202501]
+
+    def test_empty_db(self, db_con: duckdb.DuckDBPyConnection) -> None:
+        periods = list_balancetes_periods(db_con)
+        assert periods == []

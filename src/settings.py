@@ -31,6 +31,17 @@ class Settings(BaseSettings):  # type: ignore[misc]
         description="Number of quarterly periods to fetch (5 years)",
     )
 
+    # Balancetes 4040
+    balancetes_base_url: str = Field(
+        default="https://www4.bcb.gov.br/fis/cosif/cont/balan/bancos",
+    )
+    balancetes_timeout_sec: int = Field(default=120)
+    balancetes_max_retries: int = Field(default=3)
+    balancetes_history_months: int = Field(
+        default=24,
+        description="Number of monthly periods to fetch for balancetes",
+    )
+
     # Dashboard
     dash_debug: bool = Field(default=False)
     dash_host: str = Field(default="0.0.0.0")
