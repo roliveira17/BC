@@ -346,3 +346,44 @@ def get_balancetes_kpi_trend(
         ORDER BY ano_mes
     """
     return con.execute(sql, [cnpj8, conta]).pl()
+
+
+def get_balancetes_ratio_trend(
+    con: duckdb.DuckDBPyConnection,
+    cnpj8: str,
+) -> pl.DataFrame:
+    """Return derived ratios (ROE, ROA, Alavancagem) over time for one institution.
+
+    Computes from PL, Ativo Total and Resultado Líquido in balancetes_raw.
+    Returns: DataFrame [ano_mes, patrimonio_liquido, ativo_total,
+             resultado_liquido, roe, roa, alavancagem]
+    """
+    sql = """
+        SELECT
+            ano_mes,
+            SUM(CASE WHEN conta = ? THEN saldo END) AS patrimonio_liquido,
+            SUM(CASE WHEN conta = ? THEN saldo END) AS ativo_total,
+            SUM(CASE WHEN conta = ? THEN saldo END) AS resultado_liquido
+        FROM balancetes_raw
+        WHERE cnpj8 = ?
+          AND conta IN (?, ?, ?)
+        GROUP BY ano_mes
+        ORDER BY ano_mes
+    """
+    params: list[str] = [
+        COSIF_PATRIMONIO_LIQUIDO, COSIF_ATIVO_TOTAL, COSIF_RESULTADO_LIQUIDO,
+        cnpj8,
+        COSIF_PATRIMONIO_LIQUIDO, COSIF_ATIVO_TOTAL, COSIF_RESULTADO_LIQUIDO,
+    ]
+    df = con.execute(sql, params).pl()
+    if df.is_empty():
+        return df.with_columns(
+            pl.lit(None, dtype=pl.Float64).alias("roe"),
+            pl.lit(None, dtype=pl.Float64).alias("roa"),
+            pl.lit(None, dtype=pl.Float64).alias("alavancagem"),
+        )
+    return df.with_columns(
+        (pl.col("resultado_liquido") / pl.col("patrimonio_liquido")).alias("roe"),
+        (pl.col("resultado_liquido") / pl.col("ativo_total")).alias("roa"),
+        (pl.col("ativo_total") / pl.col("patrimonio_liquido")).alias("alavancagem"),
+    )

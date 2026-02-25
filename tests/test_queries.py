@@ -16,6 +16,7 @@ from src.queries import (
     get_available_periods,
     get_balancetes_kpi_trend,
     get_balancetes_multi_kpi,
+    get_balancetes_ratio_trend,
     get_balancetes_top50,
     get_balancetes_trend,
     get_capital_indicators,
@@ -426,6 +427,76 @@ class TestBalancetesKpiTrend:
         _seed_multi_kpi(db_con)
         result = get_balancetes_kpi_trend(db_con, "99999999", COSIF_ATIVO_TOTAL)
         assert result.shape[0] == 0
+
+
+class TestBalancetesRatioTrend:
+    def test_returns_all_ratio_columns(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        _seed_multi_kpi(db_con)
+        result = get_balancetes_ratio_trend(db_con, "11111111")
+        expected = {"ano_mes", "patrimonio_liquido", "ativo_total",
+                    "resultado_liquido", "roe", "roa", "alavancagem"}
+        assert expected.issubset(set(result.columns))
+
+    def test_computes_roe_correctly(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        _seed_multi_kpi(db_con)
+        result = get_balancetes_ratio_trend(db_con, "11111111")
+        row = result.row(0, named=True)
+        # ROE = resultado / PL = 500000 / 5000000 = 0.1
+        assert abs(row["roe"] - 0.1) < 1e-9
+
+    def test_computes_roa_correctly(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        _seed_multi_kpi(db_con)
+        result = get_balancetes_ratio_trend(db_con, "11111111")
+        row = result.row(0, named=True)
+        # ROA = resultado / ativo = 500000 / 20000000 = 0.025
+        assert abs(row["roa"] - 0.025) < 1e-9
+
+    def test_computes_alavancagem_correctly(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        _seed_multi_kpi(db_con)
+        result = get_balancetes_ratio_trend(db_con, "11111111")
+        row = result.row(0, named=True)
+        # Alavancagem = ativo / PL = 20000000 / 5000000 = 4.0
+        assert abs(row["alavancagem"] - 4.0) < 1e-9
+
+    def test_returns_multiple_periods(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        _seed_multi_kpi(db_con)
+        result = get_balancetes_ratio_trend(db_con, "11111111")
+        assert result.shape[0] == 2
+        periods = result["ano_mes"].to_list()
+        assert periods == [202501, 202502]
+
+    def test_empty_for_unknown_cnpj8(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        _seed_multi_kpi(db_con)
+        result = get_balancetes_ratio_trend(db_con, "99999999")
+        assert result.shape[0] == 0
+        # Should still have ratio columns
+        assert "roe" in result.columns
+        assert "roa" in result.columns
+        assert "alavancagem" in result.columns
+
+    def test_partial_data_returns_none_ratios(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        """Institution 2 has PL and Ativo but no Resultado — ratios involving it are None."""
+        _seed_multi_kpi(db_con)
+        result = get_balancetes_ratio_trend(db_con, "22222222")
+        row = result.row(0, named=True)
+        # Has PL and Ativo, no Resultado → ROE and ROA are None
+        assert row["resultado_liquido"] is None
+        assert row["roe"] is None
+        assert row["roa"] is None
 
 
 class TestBalancetesKpiMap:

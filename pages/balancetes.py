@@ -9,6 +9,7 @@ from src.queries import (
     BALANCETES_KPI_MAP,
     get_balancetes_kpi_trend,
     get_balancetes_multi_kpi,
+    get_balancetes_ratio_trend,
     get_balancetes_trend,
     list_balancetes_periods,
 )
@@ -20,6 +21,15 @@ settings = Settings()
 con = get_connection(settings.duckdb_path)
 
 KPI_OPTIONS = [{"label": name, "value": code} for name, code in BALANCETES_KPI_MAP.items()]
+
+RATIO_LABELS = {
+    "ratio:roe": "ROE (Resultado / PL)",
+    "ratio:roa": "ROA (Resultado / Ativo)",
+    "ratio:alavancagem": "Alavancagem (Ativo / PL)",
+}
+RATIO_OPTIONS = [{"label": v, "value": k} for k, v in RATIO_LABELS.items()]
+
+TREND_OPTIONS = KPI_OPTIONS + [{"label": "———", "value": "", "disabled": True}] + RATIO_OPTIONS
 
 layout = html.Div(
     [
@@ -67,10 +77,10 @@ layout = html.Div(
                         ),
                         dcc.Dropdown(
                             id="balancetes-kpi",
-                            options=KPI_OPTIONS,
+                            options=TREND_OPTIONS,
                             value=BALANCETES_KPI_MAP["Patrimônio Líquido"],
                             clearable=False,
-                            style={"width": "250px", "display": "inline-block"},
+                            style={"width": "300px", "display": "inline-block"},
                         ),
                     ],
                     style={"display": "inline-block"},
@@ -151,16 +161,25 @@ def render_top50(
     )
     bar_chart = dcc.Graph(figure=fig)
 
+    # Compute derived ratios
+    pdf["roe"] = pdf["resultado_liquido"] / pdf["patrimonio_liquido"]
+    pdf["roa"] = pdf["resultado_liquido"] / pdf["ativo_total"]
+    pdf["alavancagem"] = pdf["ativo_total"] / pdf["patrimonio_liquido"]
+
     # Multi-KPI data table
-    num_cols = [
+    saldo_cols = [
         "patrimonio_liquido", "ativo_total",
         "operacoes_credito", "depositos", "resultado_liquido",
     ]
+    ratio_cols = ["roe", "roa", "alavancagem"]
+    all_num_cols = saldo_cols + ratio_cols
     table_df = pdf[
-        ["rank", "nome_inst", "cnpj8", "cod_display", "nome_conglomerado"] + num_cols
+        ["rank", "nome_inst", "cnpj8", "cod_display", "nome_conglomerado"] + all_num_cols
     ].copy()
-    for col in num_cols:
+    for col in saldo_cols:
         table_df[col] = table_df[col].round(2)
+    for col in ratio_cols:
+        table_df[col] = table_df[col].round(4)
 
     table = dash_table.DataTable(
         data=table_df.to_dict("records"),
@@ -175,6 +194,9 @@ def render_top50(
             {"name": "Op. Crédito", "id": "operacoes_credito", "type": "numeric"},
             {"name": "Depósitos", "id": "depositos", "type": "numeric"},
             {"name": "Resultado", "id": "resultado_liquido", "type": "numeric"},
+            {"name": "ROE", "id": "roe", "type": "numeric"},
+            {"name": "ROA", "id": "roa", "type": "numeric"},
+            {"name": "Alav.", "id": "alavancagem", "type": "numeric"},
         ],
         page_size=50,
         style_table={"overflowX": "auto"},
@@ -205,20 +227,42 @@ def render_top50(
     Input("balancetes-kpi", "value"),
 )
 def render_trend(cnpj8: str | None, kpi_conta: str | None) -> object:
-    """Render KPI trend line chart for a selected institution."""
+    """Render KPI or ratio trend line chart for a selected institution."""
     if cnpj8 is None:
         return html.P(
             "Selecione uma instituição para ver a tendência.",
             style={"color": "#888", "fontStyle": "italic"},
         )
+    if not kpi_conta:
+        return html.P("Selecione um indicador.", style={"color": "#888"})
 
-    # Resolve friendly name for chart title
+    # --- Derived ratios ---
+    if kpi_conta.startswith("ratio:"):
+        ratio_key = kpi_conta.split(":", 1)[1]  # roe | roa | alavancagem
+        kpi_name = RATIO_LABELS.get(kpi_conta, ratio_key.upper())
+
+        df = get_balancetes_ratio_trend(con, cnpj8)
+        if df.is_empty() or ratio_key not in df.columns:
+            return html.P("Nenhum dado de tendência disponível.", style={"color": "#888"})
+        pdf = df.to_pandas()
+
+        fig = px.line(
+            pdf,
+            x="ano_mes",
+            y=ratio_key,
+            title=f"Evolução — {kpi_name} — CNPJ8: {cnpj8}",
+            labels={"ano_mes": "Período (AAAAMM)", ratio_key: kpi_name},
+            markers=True,
+        )
+        fig.update_layout(height=400)
+        return dcc.Graph(figure=fig)
+
+    # --- COSIF account balances ---
     kpi_name = next(
         (name for name, code in BALANCETES_KPI_MAP.items() if code == kpi_conta),
         "KPI",
     )
 
-    # Use specialized trend query for PL (stored in top50 table), generic for others
     if kpi_conta == BALANCETES_KPI_MAP["Patrimônio Líquido"]:
         df = get_balancetes_trend(con, cnpj8)
         if df.is_empty():
@@ -226,8 +270,6 @@ def render_trend(cnpj8: str | None, kpi_conta: str | None) -> object:
         pdf = df.to_pandas()
         y_col = "patrimonio_liquido"
     else:
-        if kpi_conta is None:
-            return html.P("Selecione um indicador.", style={"color": "#888"})
         df = get_balancetes_kpi_trend(con, cnpj8, kpi_conta)
         if df.is_empty():
             return html.P("Nenhum dado de tendência disponível.", style={"color": "#888"})
