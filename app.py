@@ -124,7 +124,7 @@ def update_institution_options(segmento: str) -> list[dict[str, str | int]]:
     if df.is_empty():
         return []
     return [
-        {"label": row[1], "value": row[0]}
+        {"label": f"{row[1]} (C{row[0]:07d})", "value": row[0]}
         for row in df.iter_rows()
     ]
 
