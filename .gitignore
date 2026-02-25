@@ -1,7 +1,7 @@
-# Data (large files, not tracked)
-data/raw/
-data/staging/
-data/curated/
+# Data
+data/
+*.duckdb
+*.duckdb.wal
 
 # Python
 __pycache__/
@@ -27,5 +27,5 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# Streamlit
-.streamlit/
+# Environment
+.env
