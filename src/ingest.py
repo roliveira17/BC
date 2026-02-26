@@ -189,6 +189,54 @@ def _compute_and_insert_top50(
     return count
 
 
+def compute_top50_from_ifdata(
+    con: duckdb.DuckDBPyConnection, ano_mes: int
+) -> int:
+    """Compute Top 50 by PL from report_values and insert into balancetes_top50.
+
+    Uses Resumo report (relatorio='1') Patrimônio Líquido line.
+    Returns row count inserted.
+    """
+    con.execute("DELETE FROM balancetes_top50 WHERE ano_mes = ?", [ano_mes])
+
+    sql = """
+        INSERT INTO balancetes_top50
+        WITH pl_data AS (
+            SELECT
+                rv.cod_conglomerado,
+                rv.nome_conglomerado,
+                rv.valor_a AS patrimonio_liquido
+            FROM report_values rv
+            WHERE rv.ano_mes = ?
+              AND rv.relatorio = '1'
+              AND rv.nome_linha LIKE '%atrim%nio L%quido'
+        ),
+        ranked AS (
+            SELECT
+                ROW_NUMBER() OVER (ORDER BY patrimonio_liquido DESC) AS rank,
+                CAST(p.cod_conglomerado AS VARCHAR) AS cnpj8,
+                p.nome_conglomerado AS nome_inst,
+                p.cod_conglomerado,
+                p.nome_conglomerado,
+                p.patrimonio_liquido
+            FROM pl_data p
+            WHERE p.patrimonio_liquido IS NOT NULL
+        )
+        SELECT ?, rank, cnpj8, nome_inst, cod_conglomerado,
+               nome_conglomerado, patrimonio_liquido
+        FROM ranked
+        WHERE rank <= 50
+        ORDER BY rank
+    """
+    con.execute(sql, [ano_mes, ano_mes])
+    result = con.execute(
+        "SELECT COUNT(*) FROM balancetes_top50 WHERE ano_mes = ?", [ano_mes]
+    ).fetchone()
+    count = result[0] if result else 0
+    logger.info("computed_top50_ifdata", ano_mes=ano_mes, rows=count)
+    return count
+
+
 def ingest_balancetes(
     con: duckdb.DuckDBPyConnection,
     records: list[BalanceteRow],

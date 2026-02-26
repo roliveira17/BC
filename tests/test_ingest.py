@@ -3,6 +3,7 @@ from __future__ import annotations
 import duckdb
 
 from src.ingest import (
+    compute_top50_from_ifdata,
     generate_quarter_periods,
     ingest_balancetes,
     ingest_cadastro,
@@ -243,3 +244,68 @@ class TestIngestBalancetes:
         assert len(top50) == 1
         assert top50[0][0] == 99
         assert top50[0][1] == "BANCO TEST"
+
+
+class TestComputeTop50FromIfdata:
+    def test_ranks_by_pl(self, db_con: duckdb.DuckDBPyConnection) -> None:
+        records = [
+            _make_report_value(
+                cod_conglomerado=1, valor_a=5000000.0,
+                nome_linha="Patrimônio Líquido",
+            ),
+            _make_report_value(
+                cod_conglomerado=2, valor_a=3000000.0,
+                nome_linha="Patrimônio Líquido",
+            ),
+            _make_report_value(
+                cod_conglomerado=3, valor_a=1000000.0,
+                nome_linha="Patrimônio Líquido",
+            ),
+        ]
+        ingest_report_values(db_con, records, 202412, "1")
+        count = compute_top50_from_ifdata(db_con, 202412)
+
+        assert count == 3
+        top50 = db_con.execute(
+            "SELECT rank, cod_conglomerado, patrimonio_liquido "
+            "FROM balancetes_top50 WHERE ano_mes = 202412 ORDER BY rank"
+        ).fetchall()
+        assert top50[0][1] == 1  # cod_conglomerado=1 has highest PL
+        assert top50[0][2] == 5000000.0
+        assert top50[1][1] == 2
+        assert top50[2][1] == 3
+
+    def test_limits_to_50(self, db_con: duckdb.DuckDBPyConnection) -> None:
+        records = [
+            _make_report_value(
+                cod_conglomerado=i, valor_a=float(100 - i),
+                nome_linha="Patrimônio Líquido",
+            )
+            for i in range(1, 61)
+        ]
+        ingest_report_values(db_con, records, 202412, "1")
+        count = compute_top50_from_ifdata(db_con, 202412)
+        assert count == 50
+
+    def test_empty_data_returns_zero(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        count = compute_top50_from_ifdata(db_con, 202412)
+        assert count == 0
+
+    def test_is_idempotent(self, db_con: duckdb.DuckDBPyConnection) -> None:
+        records = [
+            _make_report_value(
+                cod_conglomerado=1, valor_a=1000000.0,
+                nome_linha="Patrimônio Líquido",
+            ),
+        ]
+        ingest_report_values(db_con, records, 202412, "1")
+        compute_top50_from_ifdata(db_con, 202412)
+        compute_top50_from_ifdata(db_con, 202412)
+
+        rows = db_con.execute(
+            "SELECT COUNT(*) FROM balancetes_top50 WHERE ano_mes = 202412"
+        ).fetchone()
+        assert rows is not None
+        assert rows[0] == 1

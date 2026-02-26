@@ -14,7 +14,7 @@ import structlog
 from src.db import get_connection
 from src.ifdata_client import IFDataClient
 from src.ingest import (
-    generate_quarter_periods,
+    compute_top50_from_ifdata,
     ingest_cadastro,
     ingest_report_values,
     is_period_fetched,
@@ -38,13 +38,16 @@ def main() -> None:
 
     settings = Settings()
     quarters = args.quarters or settings.history_quarters
-    periods = generate_quarter_periods(quarters)
-
-    logger.info("refresh_starting", quarters=quarters, periods=periods)
 
     con = get_connection(settings.duckdb_path)
 
     with IFDataClient(settings) as client:
+        # Use real available periods from the API instead of generated dates
+        all_periods = client.list_periods()
+        periods = all_periods[:quarters]
+
+        logger.info("refresh_starting", quarters=quarters, periods=periods)
+
         for ano_mes in periods:
             # Fetch and ingest cadastro
             if args.force or not is_period_fetched(con, ano_mes, "cadastro"):
@@ -71,7 +74,7 @@ def main() -> None:
                 try:
                     values = client.fetch_report_values(
                         ano_mes=ano_mes,
-                        tipo_instituicao=settings.ifdata_tipo_instituicao,
+                        tipo_inst=settings.ifdata_tipo_inst_id,
                         relatorio=relatorio,
                     )
                     count = ingest_report_values(con, values, ano_mes, relatorio)
@@ -86,6 +89,13 @@ def main() -> None:
                         "report_failed", ano_mes=ano_mes, relatorio=relatorio
                     )
                     continue
+
+            # Derive Top 50 from IF.data report values
+            try:
+                top50_count = compute_top50_from_ifdata(con, ano_mes)
+                logger.info("top50_done", ano_mes=ano_mes, rows=top50_count)
+            except Exception:
+                logger.exception("top50_failed", ano_mes=ano_mes)
 
     con.close()
     logger.info("refresh_complete", periods_attempted=len(periods))

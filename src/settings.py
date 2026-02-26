@@ -7,14 +7,14 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):  # type: ignore[misc]
     """Application settings loaded from environment variables with BC_ prefix."""
 
-    # IF.data API
+    # IF.data REST API
     ifdata_base_url: str = Field(
-        default="https://olinda.bcb.gov.br/olinda/servico/IFDATA/versao/v1/odata",
+        default="https://www3.bcb.gov.br/ifdata/rest",
     )
-    ifdata_timeout_sec: int = Field(default=60)
-    ifdata_tipo_instituicao: int = Field(
-        default=1,
-        description="1=Congl. Financeiro, 2=Congl. Prudencial, 3=Individual",
+    ifdata_timeout_sec: int = Field(default=120)
+    ifdata_tipo_inst_id: int = Field(
+        default=1009,
+        description="1009=Congl. Prudencial, 1005=Congl. Financeiro, 1006=Individual",
     )
     ifdata_relatorios: list[str] = Field(
         default=["1", "4", "5"],
