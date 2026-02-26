@@ -29,3 +29,6 @@ Thumbs.db
 
 # Environment
 .env
+
+# Generated HTML maps
+*.html

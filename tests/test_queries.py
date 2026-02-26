@@ -12,6 +12,7 @@ from src.queries import (
     COSIF_PATRIMONIO_LIQUIDO,
     COSIF_RESULTADO_LIQUIDO,
     compare_institutions,
+    compare_pl_trend,
     get_available_indicators,
     get_available_periods,
     get_balancetes_kpi_trend,
@@ -22,6 +23,7 @@ from src.queries import (
     get_capital_indicators,
     get_segment_ranking,
     get_summary_indicators,
+    get_top50_enriched,
     list_balancetes_periods,
     list_institutions,
 )
@@ -338,6 +340,83 @@ def _seed_multi_kpi(con: duckdb.DuckDBPyConnection) -> None:
         ingest_balancetes(con, rows, ano_mes)
 
 
+# --- Combined (Balancetes + IF.data) Query Tests ---
+
+
+def _seed_combined(con: duckdb.DuckDBPyConnection) -> None:
+    """Seed both balancetes and IF.data with compatible CNPJ8 bridge.
+
+    Creates 3 institutions:
+      - 11111111 → cod_conglomerado=1 (has IF.data)
+      - 22222222 → cod_conglomerado=2 (has IF.data)
+      - 33333333 → no cadastro match (no IF.data bridge)
+    Balancetes period: 202501.
+    IF.data period: 202412 (closest quarter <= 202501).
+    """
+    # Cadastro with CNPJ matching cnpj8
+    ingest_cadastro(
+        con,
+        [
+            _institution(1, 10, "S1"),  # cnpj = 00000000000010
+            _institution(2, 20, "S2"),  # cnpj = 00000000000020
+        ],
+        202412,
+    )
+    # Override cnpj to match balancetes cnpj8
+    con.execute(
+        "UPDATE cadastro SET cnpj = '11111111000100' "
+        "WHERE cod_conglomerado = 1 AND ano_mes = 202412"
+    )
+    con.execute(
+        "UPDATE cadastro SET cnpj = '22222222000100' "
+        "WHERE cod_conglomerado = 2 AND ano_mes = 202412"
+    )
+
+    # Balancetes (3 institutions, 2 periods)
+    for ano_mes in [202501, 202412]:
+        rows = [
+            _balancete_row(
+                cnpj="11111111000100", saldo=5000000.0, ano_mes=ano_mes
+            ),
+            _balancete_row(
+                cnpj="22222222000100", saldo=3000000.0, ano_mes=ano_mes
+            ),
+            _balancete_row(
+                cnpj="33333333000100", saldo=1000000.0, ano_mes=ano_mes
+            ),
+        ]
+        ingest_balancetes(con, rows, ano_mes)
+
+    # IF.data report_values at 202412
+    ingest_report_values(
+        con,
+        [
+            _report_val(1, 14.5, "Indice de Basileia"),
+            _report_val(2, 12.3, "Indice de Basileia"),
+        ],
+        202412,
+        "5",
+    )
+    ingest_report_values(
+        con,
+        [
+            _report_val(1, 500000.0, "Ativo Total"),
+            _report_val(2, 300000.0, "Ativo Total"),
+        ],
+        202412,
+        "1",
+    )
+    ingest_report_values(
+        con,
+        [
+            _report_val(1, 80000.0, "Lucro Liquido"),
+            _report_val(2, 50000.0, "Lucro Liquido"),
+        ],
+        202412,
+        "4",
+    )
+
+
 class TestBalancetesMultiKpi:
     def test_returns_all_kpi_columns(
         self, db_con: duckdb.DuckDBPyConnection
@@ -513,3 +592,81 @@ class TestBalancetesKpiMap:
         assert BALANCETES_KPI_MAP["Operações de Crédito"] == COSIF_OPERACOES_CREDITO
         assert BALANCETES_KPI_MAP["Depósitos"] == COSIF_DEPOSITOS
         assert BALANCETES_KPI_MAP["Resultado Líquido"] == COSIF_RESULTADO_LIQUIDO
+
+
+class TestGetTop50Enriched:
+    def test_returns_enriched_data(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        _seed_combined(db_con)
+        result = get_top50_enriched(db_con, 202501)
+        assert result.shape[0] == 3
+        expected_cols = {
+            "ano_mes", "rank", "cnpj8", "nome_inst",
+            "cod_conglomerado", "nome_conglomerado",
+            "patrimonio_liquido", "basileia", "ativo_total",
+            "lucro_liquido", "ifdata_periodo",
+        }
+        assert set(result.columns) == expected_cols
+
+    def test_default_uses_latest_period(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        _seed_combined(db_con)
+        result = get_top50_enriched(db_con)
+        assert result.shape[0] == 3
+        assert result["ano_mes"][0] == 202501
+
+    def test_institution_with_bridge_has_indicators(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        _seed_combined(db_con)
+        result = get_top50_enriched(db_con, 202501)
+        row_1 = result.filter(result["cnpj8"] == "11111111")
+        assert row_1.shape[0] == 1
+        assert row_1["basileia"][0] is not None
+        assert row_1["ativo_total"][0] is not None
+        assert row_1["lucro_liquido"][0] is not None
+
+    def test_institution_without_bridge_has_nulls(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        _seed_combined(db_con)
+        result = get_top50_enriched(db_con, 202501)
+        row_3 = result.filter(result["cnpj8"] == "33333333")
+        assert row_3.shape[0] == 1
+        assert row_3["basileia"][0] is None
+        assert row_3["ativo_total"][0] is None
+        assert row_3["lucro_liquido"][0] is None
+
+    def test_empty_when_no_data(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        result = get_top50_enriched(db_con, 209901)
+        assert result.shape[0] == 0
+
+
+class TestComparePlTrend:
+    def test_multiple_institutions(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        _seed_combined(db_con)
+        result = compare_pl_trend(db_con, ["11111111", "22222222"])
+        # 2 institutions x 2 periods = 4 rows
+        assert result.shape[0] == 4
+        assert set(result.columns) == {
+            "ano_mes", "cnpj8", "nome_inst", "patrimonio_liquido",
+        }
+
+    def test_empty_list_returns_empty(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        result = compare_pl_trend(db_con, [])
+        assert result.shape[0] == 0
+
+    def test_unknown_cnpj8_returns_empty(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        _seed_combined(db_con)
+        result = compare_pl_trend(db_con, ["99999999"])
+        assert result.shape[0] == 0

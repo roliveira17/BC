@@ -72,6 +72,15 @@ app.layout = html.Div(
                             "Balancetes 4040",
                             href="/balancetes",
                             style={
+                                "marginRight": "24px",
+                                "fontWeight": "bold",
+                                "textDecoration": "none",
+                            },
+                        ),
+                        dcc.Link(
+                            "Conglomerados",
+                            href="/conglomerados",
+                            style={
                                 "fontWeight": "bold",
                                 "textDecoration": "none",
                             },
