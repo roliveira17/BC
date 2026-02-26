@@ -387,3 +387,102 @@ def get_balancetes_ratio_trend(
         (pl.col("resultado_liquido") / pl.col("ativo_total")).alias("roa"),
         (pl.col("ativo_total") / pl.col("patrimonio_liquido")).alias("alavancagem"),
     )
+
+
+def get_top50_enriched(
+    con: duckdb.DuckDBPyConnection,
+    ano_mes: int | None = None,
+) -> pl.DataFrame:
+    """Top 50 by PL enriched with IF.data indicators from the closest quarter.
+
+    LEFT JOINs Basileia (report 5), Ativo Total (report 1), and Lucro Líquido
+    (report 4) via the cod_conglomerado bridge.
+
+    Returns: DataFrame [ano_mes, rank, cnpj8, nome_inst, cod_conglomerado,
+                        nome_conglomerado, patrimonio_liquido, basileia,
+                        ativo_total, lucro_liquido, ifdata_periodo]
+    """
+    params: list[int] = []
+    if ano_mes is not None:
+        period_clause = "b.ano_mes = ?"
+        params.append(ano_mes)
+    else:
+        period_clause = "b.ano_mes = (SELECT MAX(ano_mes) FROM balancetes_top50)"
+
+    sql = f"""
+        WITH top50 AS (
+            SELECT *
+            FROM balancetes_top50 b
+            WHERE {period_clause}
+        ),
+        closest_q AS (
+            SELECT MAX(ano_mes) AS q_period
+            FROM report_values
+            WHERE ano_mes <= (SELECT MAX(ano_mes) FROM top50)
+        ),
+        basileia AS (
+            SELECT cod_conglomerado, MAX(valor_a) AS basileia
+            FROM report_values
+            WHERE relatorio = '5'
+              AND nome_linha LIKE '%asileia%'
+              AND ano_mes = (SELECT q_period FROM closest_q)
+            GROUP BY cod_conglomerado
+        ),
+        ativo AS (
+            SELECT cod_conglomerado, MAX(valor_a) AS ativo_total
+            FROM report_values
+            WHERE relatorio = '1'
+              AND nome_linha LIKE '%tivo Total%'
+              AND ano_mes = (SELECT q_period FROM closest_q)
+            GROUP BY cod_conglomerado
+        ),
+        lucro AS (
+            SELECT cod_conglomerado, MAX(valor_a) AS lucro_liquido
+            FROM report_values
+            WHERE relatorio = '4'
+              AND nome_linha LIKE '%ucro%'
+              AND ano_mes = (SELECT q_period FROM closest_q)
+            GROUP BY cod_conglomerado
+        )
+        SELECT t.ano_mes, t.rank, t.cnpj8, t.nome_inst,
+               t.cod_conglomerado, t.nome_conglomerado,
+               t.patrimonio_liquido,
+               bas.basileia,
+               atv.ativo_total,
+               luc.lucro_liquido,
+               cq.q_period AS ifdata_periodo
+        FROM top50 t
+        LEFT JOIN basileia bas ON bas.cod_conglomerado = t.cod_conglomerado
+        LEFT JOIN ativo atv ON atv.cod_conglomerado = t.cod_conglomerado
+        LEFT JOIN lucro luc ON luc.cod_conglomerado = t.cod_conglomerado
+        CROSS JOIN closest_q cq
+        ORDER BY t.rank
+    """
+    return con.execute(sql, params).pl()
+
+
+def compare_pl_trend(
+    con: duckdb.DuckDBPyConnection,
+    cnpj8_list: list[str],
+) -> pl.DataFrame:
+    """PL trend over time for multiple institutions.
+
+    Returns: DataFrame [ano_mes, cnpj8, nome_inst, patrimonio_liquido]
+    """
+    if not cnpj8_list:
+        return pl.DataFrame(
+            schema={
+                "ano_mes": pl.Int64,
+                "cnpj8": pl.Utf8,
+                "nome_inst": pl.Utf8,
+                "patrimonio_liquido": pl.Float64,
+            }
+        )
+    placeholders = ", ".join(["?"] * len(cnpj8_list))
+    sql = f"""
+        SELECT ano_mes, cnpj8, nome_inst, patrimonio_liquido
+        FROM balancetes_top50
+        WHERE cnpj8 IN ({placeholders})
+        ORDER BY ano_mes, cnpj8
+    """
+    return con.execute(sql, cnpj8_list).pl()
