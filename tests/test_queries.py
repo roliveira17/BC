@@ -21,6 +21,7 @@ from src.queries import (
     get_balancetes_top50,
     get_balancetes_trend,
     get_capital_indicators,
+    get_institution_details,
     get_segment_ranking,
     get_summary_indicators,
     get_top50_enriched,
@@ -120,6 +121,24 @@ class TestListInstitutions:
     ) -> None:
         _seed_data(db_con)
         result = list_institutions(db_con, segmento="S5")
+        assert result.shape[0] == 0
+
+
+class TestGetInstitutionDetails:
+    def test_returns_details(self, db_con: duckdb.DuckDBPyConnection) -> None:
+        _seed_data(db_con)
+        result = get_institution_details(db_con, 1)
+        assert result.shape[0] == 1
+        row = result.row(0, named=True)
+        assert row["nome_conglomerado"] == "BANCO 1"
+        assert row["segmento"] == "S1"
+        assert row["cidade"] == "SP"
+        assert row["uf"] == "SP"
+        assert "cnpj" in result.columns
+
+    def test_unknown_returns_empty(self, db_con: duckdb.DuckDBPyConnection) -> None:
+        _seed_data(db_con)
+        result = get_institution_details(db_con, 99999)
         assert result.shape[0] == 0
 
 

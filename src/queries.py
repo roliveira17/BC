@@ -182,6 +182,24 @@ def get_available_indicators(
     return [row[0] for row in result]
 
 
+def get_institution_details(
+    con: duckdb.DuckDBPyConnection,
+    cod_conglomerado: int,
+) -> pl.DataFrame:
+    """Return metadata for one institution from the latest cadastro period.
+
+    Returns: DataFrame [cod_conglomerado, nome_conglomerado, cnpj, segmento, cidade, uf]
+    """
+    sql = """
+        SELECT DISTINCT cod_conglomerado, nome_conglomerado, cnpj, segmento, cidade, uf
+        FROM cadastro
+        WHERE cod_conglomerado = ?
+          AND ano_mes = (SELECT MAX(ano_mes) FROM cadastro)
+        LIMIT 1
+    """
+    return con.execute(sql, [cod_conglomerado]).pl()
+
+
 def get_summary_indicators(
     con: duckdb.DuckDBPyConnection,
     cod_conglomerado: int,
