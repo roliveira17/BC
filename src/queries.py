@@ -235,10 +235,19 @@ def get_dre_indicators(
     Returns: DataFrame [ano_mes, nome_linha, valor_a]
     """
     sql = """
-        SELECT ano_mes, nome_linha, valor_a
+        SELECT ano_mes,
+            CASE nome_linha
+                WHEN 'Resultado antes da Tributação, Lucro e Participação'
+                    THEN 'Resultado antes da Tributação e Participações'
+                WHEN 'Participação nos Lucros'
+                    THEN 'Participações no Lucro'
+                ELSE nome_linha
+            END AS nome_linha,
+            valor_a
         FROM report_values
         WHERE cod_conglomerado = ?
           AND relatorio = '4'
+          AND nome_linha != 'Ativo Total'
         ORDER BY ano_mes, ordenacao
     """
     return con.execute(sql, [cod_conglomerado]).pl()

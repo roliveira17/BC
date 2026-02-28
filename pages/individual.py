@@ -715,9 +715,23 @@ def render_institution_content(
         )
     )
     tables.append(
-        _build_report_table(
-            dre_df,
-            "DRE — Demonstração de Resultado (Relatório 4)",
+        html.Div(
+            [
+                _build_report_table(
+                    dre_df,
+                    "DRE — Demonstração de Resultado (Relatório 4)",
+                ),
+                html.P(
+                    "Nota: A DRE do IF.data contém apenas linhas resumidas. "
+                    "Receitas/despesas detalhadas (intermediação, serviços, "
+                    "pessoal) não estão disponíveis nesta fonte.",
+                    style={
+                        "color": "#888",
+                        "fontSize": "12px",
+                        "marginTop": "4px",
+                    },
+                ),
+            ]
         )
     )
 
