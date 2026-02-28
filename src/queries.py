@@ -504,3 +504,355 @@ def compare_pl_trend(
         ORDER BY ano_mes, cnpj8
     """
     return con.execute(sql, cnpj8_list).pl()
+
+
+def get_financial_ratios(
+    con: duckdb.DuckDBPyConnection,
+    cod_conglomerado: int,
+) -> pl.DataFrame:
+    """Compute financial ratios from Reports 1, 4, and 5 for one institution.
+
+    Returns: DataFrame [ano_mes, roe, roa, loan_to_deposit, credit_intensity,
+             securities_share, leverage, debt_equity, funding_dependency,
+             pr_coverage, basileia, capital_principal, capital_nivel1,
+             capital_excess, tax_rate]
+    """
+    sql = """
+        WITH rep1 AS (
+            SELECT ano_mes, nome_linha, valor_a
+            FROM report_values
+            WHERE cod_conglomerado = ? AND relatorio = '1'
+        ),
+        p1 AS (
+            SELECT
+                ano_mes,
+                MAX(CASE WHEN nome_linha LIKE '%ucro L%' THEN valor_a END)
+                    AS lucro_liquido,
+                MAX(CASE WHEN nome_linha LIKE '%atrim%nio L%'
+                    AND nome_linha NOT LIKE '%efer%' THEN valor_a END)
+                    AS pl,
+                MAX(CASE WHEN nome_linha = 'Ativo Total' THEN valor_a END)
+                    AS ativo_total,
+                MAX(CASE WHEN nome_linha LIKE '%arteira de Cr%'
+                    AND nome_linha NOT LIKE '%lass%' THEN valor_a END)
+                    AS carteira_credito,
+                MAX(CASE WHEN nome_linha LIKE '%apta%' THEN valor_a END)
+                    AS captacoes,
+                MAX(CASE WHEN nome_linha LIKE '%tulos e Valores%' THEN valor_a END)
+                    AS tvm,
+                MAX(CASE WHEN nome_linha LIKE '%assivo Exig%'
+                    AND nome_linha NOT LIKE '%irculante%' THEN valor_a END)
+                    AS passivo_exigivel,
+                MAX(CASE WHEN nome_linha LIKE '%efer%ncia para Compara%'
+                    THEN valor_a END)
+                    AS pr
+            FROM rep1
+            GROUP BY ano_mes
+        ),
+        rep5 AS (
+            SELECT ano_mes, nome_linha, valor_a
+            FROM report_values
+            WHERE cod_conglomerado = ? AND relatorio = '5'
+        ),
+        p5 AS (
+            SELECT
+                ano_mes,
+                MAX(CASE WHEN nome_linha LIKE '%asileia%' THEN valor_a END)
+                    AS basileia,
+                MAX(CASE WHEN nome_linha LIKE '%ndice de Capital Principal'
+                    THEN valor_a END)
+                    AS capital_principal,
+                MAX(CASE WHEN nome_linha LIKE '%apital N%vel I'
+                    THEN valor_a END)
+                    AS capital_nivel1,
+                MAX(CASE WHEN nome_linha LIKE '%az%o de Alavancagem%'
+                    THEN valor_a END)
+                    AS razao_alavancagem
+            FROM rep5
+            GROUP BY ano_mes
+        ),
+        rep4 AS (
+            SELECT ano_mes, nome_linha, valor_a
+            FROM report_values
+            WHERE cod_conglomerado = ? AND relatorio = '4'
+        ),
+        p4 AS (
+            SELECT
+                ano_mes,
+                MAX(CASE WHEN nome_linha LIKE '%esultado antes%'
+                    THEN valor_a END)
+                    AS resultado_antes_trib,
+                MAX(CASE WHEN nome_linha LIKE '%mposto de Renda%'
+                    THEN valor_a END)
+                    AS ir_csll
+            FROM rep4
+            GROUP BY ano_mes
+        )
+        SELECT
+            COALESCE(p1.ano_mes, p5.ano_mes, p4.ano_mes) AS ano_mes,
+            CASE WHEN p1.pl != 0 THEN p1.lucro_liquido / p1.pl * 100 END
+                AS roe,
+            CASE WHEN p1.ativo_total != 0
+                THEN p1.lucro_liquido / p1.ativo_total * 100 END
+                AS roa,
+            CASE WHEN p1.captacoes != 0
+                THEN p1.carteira_credito / p1.captacoes * 100 END
+                AS loan_to_deposit,
+            CASE WHEN p1.ativo_total != 0
+                THEN p1.carteira_credito / p1.ativo_total * 100 END
+                AS credit_intensity,
+            CASE WHEN p1.ativo_total != 0
+                THEN p1.tvm / p1.ativo_total * 100 END
+                AS securities_share,
+            CASE WHEN p1.pl != 0 THEN p1.ativo_total / p1.pl END
+                AS leverage,
+            CASE WHEN p1.pl != 0 THEN p1.passivo_exigivel / p1.pl END
+                AS debt_equity,
+            CASE WHEN p1.ativo_total != 0
+                THEN p1.captacoes / p1.ativo_total * 100 END
+                AS funding_dependency,
+            CASE WHEN p1.ativo_total != 0
+                THEN p1.pr / p1.ativo_total * 100 END
+                AS pr_coverage,
+            p5.basileia * 100 AS basileia,
+            p5.capital_principal * 100 AS capital_principal,
+            p5.capital_nivel1 * 100 AS capital_nivel1,
+            (p5.basileia - 0.105) * 100 AS capital_excess,
+            p5.razao_alavancagem * 100 AS razao_alavancagem,
+            CASE WHEN p4.resultado_antes_trib != 0
+                THEN p4.ir_csll / p4.resultado_antes_trib * 100 END
+                AS tax_rate
+        FROM p1
+        FULL OUTER JOIN p5 ON p1.ano_mes = p5.ano_mes
+        FULL OUTER JOIN p4 ON COALESCE(p1.ano_mes, p5.ano_mes) = p4.ano_mes
+        ORDER BY ano_mes
+    """
+    return con.execute(
+        sql, [cod_conglomerado, cod_conglomerado, cod_conglomerado]
+    ).pl()
+
+
+def get_ratio_ranking(
+    con: duckdb.DuckDBPyConnection,
+    ratio_name: str,
+    ano_mes: int | None = None,
+) -> pl.DataFrame:
+    """Rank all institutions by a computed ratio for a given period.
+
+    ratio_name must be one of the SQL column aliases from get_financial_ratios.
+    Returns: DataFrame [cod_conglomerado, nome_conglomerado, segmento, valor]
+    """
+    valid_ratios = {
+        "roe", "roa", "loan_to_deposit", "credit_intensity",
+        "securities_share", "leverage", "debt_equity",
+        "funding_dependency", "pr_coverage", "basileia",
+        "capital_principal", "capital_nivel1", "capital_excess",
+        "razao_alavancagem", "tax_rate",
+    }
+    if ratio_name not in valid_ratios:
+        return pl.DataFrame(
+            schema={
+                "cod_conglomerado": pl.Int64,
+                "nome_conglomerado": pl.Utf8,
+                "segmento": pl.Utf8,
+                "valor": pl.Float64,
+            }
+        )
+
+    params: list[int] = []
+    if ano_mes is not None:
+        period_clause = "rv.ano_mes = ?"
+        params.append(ano_mes)
+    else:
+        period_clause = "rv.ano_mes = (SELECT MAX(ano_mes) FROM report_values)"
+
+    # Build ratio expression based on ratio_name
+    ratio_expressions = {
+        "roe": (
+            "CASE WHEN MAX(CASE WHEN rv.nome_linha LIKE '%atrim%nio L%' "
+            "AND rv.nome_linha NOT LIKE '%efer%' THEN rv.valor_a END) != 0 "
+            "THEN MAX(CASE WHEN rv.nome_linha LIKE '%ucro L%' THEN rv.valor_a END) "
+            "/ MAX(CASE WHEN rv.nome_linha LIKE '%atrim%nio L%' "
+            "AND rv.nome_linha NOT LIKE '%efer%' THEN rv.valor_a END) * 100 END",
+            "'1'"
+        ),
+        "roa": (
+            "CASE WHEN MAX(CASE WHEN rv.nome_linha = 'Ativo Total' "
+            "THEN rv.valor_a END) != 0 "
+            "THEN MAX(CASE WHEN rv.nome_linha LIKE '%ucro L%' THEN rv.valor_a END) "
+            "/ MAX(CASE WHEN rv.nome_linha = 'Ativo Total' "
+            "THEN rv.valor_a END) * 100 END",
+            "'1'"
+        ),
+        "loan_to_deposit": (
+            "CASE WHEN MAX(CASE WHEN rv.nome_linha LIKE '%apta%' "
+            "THEN rv.valor_a END) != 0 "
+            "THEN MAX(CASE WHEN rv.nome_linha LIKE '%arteira de Cr%' "
+            "AND rv.nome_linha NOT LIKE '%lass%' THEN rv.valor_a END) "
+            "/ MAX(CASE WHEN rv.nome_linha LIKE '%apta%' "
+            "THEN rv.valor_a END) * 100 END",
+            "'1'"
+        ),
+        "credit_intensity": (
+            "CASE WHEN MAX(CASE WHEN rv.nome_linha = 'Ativo Total' "
+            "THEN rv.valor_a END) != 0 "
+            "THEN MAX(CASE WHEN rv.nome_linha LIKE '%arteira de Cr%' "
+            "AND rv.nome_linha NOT LIKE '%lass%' THEN rv.valor_a END) "
+            "/ MAX(CASE WHEN rv.nome_linha = 'Ativo Total' "
+            "THEN rv.valor_a END) * 100 END",
+            "'1'"
+        ),
+        "securities_share": (
+            "CASE WHEN MAX(CASE WHEN rv.nome_linha = 'Ativo Total' "
+            "THEN rv.valor_a END) != 0 "
+            "THEN MAX(CASE WHEN rv.nome_linha LIKE '%tulos e Valores%' "
+            "THEN rv.valor_a END) "
+            "/ MAX(CASE WHEN rv.nome_linha = 'Ativo Total' "
+            "THEN rv.valor_a END) * 100 END",
+            "'1'"
+        ),
+        "leverage": (
+            "CASE WHEN MAX(CASE WHEN rv.nome_linha LIKE '%atrim%nio L%' "
+            "AND rv.nome_linha NOT LIKE '%efer%' THEN rv.valor_a END) != 0 "
+            "THEN MAX(CASE WHEN rv.nome_linha = 'Ativo Total' "
+            "THEN rv.valor_a END) "
+            "/ MAX(CASE WHEN rv.nome_linha LIKE '%atrim%nio L%' "
+            "AND rv.nome_linha NOT LIKE '%efer%' THEN rv.valor_a END) END",
+            "'1'"
+        ),
+        "debt_equity": (
+            "CASE WHEN MAX(CASE WHEN rv.nome_linha LIKE '%atrim%nio L%' "
+            "AND rv.nome_linha NOT LIKE '%efer%' THEN rv.valor_a END) != 0 "
+            "THEN MAX(CASE WHEN rv.nome_linha LIKE '%assivo Exig%' "
+            "AND rv.nome_linha NOT LIKE '%irculante%' THEN rv.valor_a END) "
+            "/ MAX(CASE WHEN rv.nome_linha LIKE '%atrim%nio L%' "
+            "AND rv.nome_linha NOT LIKE '%efer%' THEN rv.valor_a END) END",
+            "'1'"
+        ),
+        "funding_dependency": (
+            "CASE WHEN MAX(CASE WHEN rv.nome_linha = 'Ativo Total' "
+            "THEN rv.valor_a END) != 0 "
+            "THEN MAX(CASE WHEN rv.nome_linha LIKE '%apta%' "
+            "THEN rv.valor_a END) "
+            "/ MAX(CASE WHEN rv.nome_linha = 'Ativo Total' "
+            "THEN rv.valor_a END) * 100 END",
+            "'1'"
+        ),
+        "pr_coverage": (
+            "CASE WHEN MAX(CASE WHEN rv.nome_linha = 'Ativo Total' "
+            "THEN rv.valor_a END) != 0 "
+            "THEN MAX(CASE WHEN rv.nome_linha LIKE '%efer%ncia para Compara%' "
+            "THEN rv.valor_a END) "
+            "/ MAX(CASE WHEN rv.nome_linha = 'Ativo Total' "
+            "THEN rv.valor_a END) * 100 END",
+            "'1'"
+        ),
+        "basileia": (
+            "MAX(CASE WHEN rv.nome_linha LIKE '%asileia%' "
+            "THEN rv.valor_a END) * 100",
+            "'5'"
+        ),
+        "capital_principal": (
+            "MAX(CASE WHEN rv.nome_linha LIKE '%ndice de Capital Principal' "
+            "THEN rv.valor_a END) * 100",
+            "'5'"
+        ),
+        "capital_nivel1": (
+            "MAX(CASE WHEN rv.nome_linha LIKE '%apital N%vel I' "
+            "THEN rv.valor_a END) * 100",
+            "'5'"
+        ),
+        "capital_excess": (
+            "(MAX(CASE WHEN rv.nome_linha LIKE '%asileia%' "
+            "THEN rv.valor_a END) - 0.105) * 100",
+            "'5'"
+        ),
+        "razao_alavancagem": (
+            "MAX(CASE WHEN rv.nome_linha LIKE '%az%o de Alavancagem%' "
+            "THEN rv.valor_a END) * 100",
+            "'5'"
+        ),
+        "tax_rate": (
+            "CASE WHEN MAX(CASE WHEN rv.nome_linha LIKE '%esultado antes%' "
+            "THEN rv.valor_a END) != 0 "
+            "THEN MAX(CASE WHEN rv.nome_linha LIKE '%mposto de Renda%' "
+            "THEN rv.valor_a END) "
+            "/ MAX(CASE WHEN rv.nome_linha LIKE '%esultado antes%' "
+            "THEN rv.valor_a END) * 100 END",
+            "'4'"
+        ),
+    }
+
+    expr, report = ratio_expressions[ratio_name]
+
+    sql = f"""
+        SELECT
+            rv.cod_conglomerado,
+            rv.nome_conglomerado,
+            COALESCE(c.segmento, '') AS segmento,
+            {expr} AS valor
+        FROM report_values rv
+        LEFT JOIN cadastro c
+            ON c.cod_conglomerado = rv.cod_conglomerado
+            AND c.ano_mes = rv.ano_mes
+        WHERE rv.relatorio = {report}
+          AND {period_clause}
+        GROUP BY rv.cod_conglomerado, rv.nome_conglomerado, c.segmento
+        HAVING valor IS NOT NULL
+        ORDER BY valor DESC
+    """
+    return con.execute(sql, params).pl()
+
+
+def get_market_share_pl(
+    con: duckdb.DuckDBPyConnection,
+    ano_mes: int | None = None,
+    top_n: int = 20,
+) -> pl.DataFrame:
+    """Compute market share by Patrimônio Líquido for top N institutions.
+
+    Returns: DataFrame [cod_conglomerado, nome_conglomerado, segmento,
+             pl_value, market_share_pct]
+    """
+    params: list[int] = []
+    if ano_mes is not None:
+        period_clause = "rv.ano_mes = ?"
+        params.append(ano_mes)
+    else:
+        period_clause = (
+            "rv.ano_mes = (SELECT MAX(ano_mes) FROM report_values)"
+        )
+
+    sql = f"""
+        WITH pl_data AS (
+            SELECT
+                rv.cod_conglomerado,
+                rv.nome_conglomerado,
+                COALESCE(c.segmento, '') AS segmento,
+                rv.valor_a AS pl_value
+            FROM report_values rv
+            LEFT JOIN cadastro c
+                ON c.cod_conglomerado = rv.cod_conglomerado
+                AND c.ano_mes = rv.ano_mes
+            WHERE rv.relatorio = '1'
+              AND rv.nome_linha LIKE '%atrim%nio L%'
+              AND rv.nome_linha NOT LIKE '%efer%'
+              AND {period_clause}
+              AND rv.valor_a IS NOT NULL
+        ),
+        total AS (
+            SELECT SUM(pl_value) AS total_pl FROM pl_data
+        )
+        SELECT
+            p.cod_conglomerado,
+            p.nome_conglomerado,
+            p.segmento,
+            p.pl_value,
+            p.pl_value / t.total_pl * 100 AS market_share_pct
+        FROM pl_data p
+        CROSS JOIN total t
+        ORDER BY p.pl_value DESC
+        LIMIT ?
+    """
+    params.append(top_n)
+    return con.execute(sql, params).pl()

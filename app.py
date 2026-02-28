@@ -81,6 +81,15 @@ app.layout = html.Div(
                             "Conglomerados",
                             href="/conglomerados",
                             style={
+                                "marginRight": "24px",
+                                "fontWeight": "bold",
+                                "textDecoration": "none",
+                            },
+                        ),
+                        dcc.Link(
+                            "Indicadores",
+                            href="/indicadores",
+                            style={
                                 "fontWeight": "bold",
                                 "textDecoration": "none",
                             },
