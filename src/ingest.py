@@ -50,9 +50,7 @@ def generate_quarter_periods(n_quarters: int) -> list[int]:
     return periods
 
 
-def is_period_fetched(
-    con: duckdb.DuckDBPyConnection, ano_mes: int, relatorio: str
-) -> bool:
+def is_period_fetched(con: duckdb.DuckDBPyConnection, ano_mes: int, relatorio: str) -> bool:
     """Check fetch_log for whether this period+report is already ingested."""
     result = con.execute(
         "SELECT 1 FROM fetch_log WHERE ano_mes = ? AND relatorio = ?",
@@ -91,8 +89,7 @@ def ingest_cadastro(
 
     # Track in fetch_log
     con.execute(
-        "INSERT OR REPLACE INTO fetch_log (ano_mes, relatorio, row_count) "
-        "VALUES (?, ?, ?)",
+        "INSERT OR REPLACE INTO fetch_log (ano_mes, relatorio, row_count) VALUES (?, ?, ?)",
         [ano_mes, "cadastro", len(rows)],
     )
     logger.info("ingested_cadastro", ano_mes=ano_mes, rows=len(rows))
@@ -132,19 +129,14 @@ def ingest_report_values(
 
     # Track in fetch_log
     con.execute(
-        "INSERT OR REPLACE INTO fetch_log (ano_mes, relatorio, row_count) "
-        "VALUES (?, ?, ?)",
+        "INSERT OR REPLACE INTO fetch_log (ano_mes, relatorio, row_count) VALUES (?, ?, ?)",
         [ano_mes, relatorio, len(rows)],
     )
-    logger.info(
-        "ingested_report", ano_mes=ano_mes, relatorio=relatorio, rows=len(rows)
-    )
+    logger.info("ingested_report", ano_mes=ano_mes, relatorio=relatorio, rows=len(rows))
     return len(rows)
 
 
-def _compute_and_insert_top50(
-    con: duckdb.DuckDBPyConnection, ano_mes: int
-) -> int:
+def _compute_and_insert_top50(con: duckdb.DuckDBPyConnection, ano_mes: int) -> int:
     """Compute Top 50 by PL from balancetes_raw and insert into balancetes_top50.
 
     Uses COSIF account 6.0.0.00.00-2 (Patrimônio Líquido).
@@ -189,9 +181,7 @@ def _compute_and_insert_top50(
     return count
 
 
-def compute_top50_from_ifdata(
-    con: duckdb.DuckDBPyConnection, ano_mes: int
-) -> int:
+def compute_top50_from_ifdata(con: duckdb.DuckDBPyConnection, ano_mes: int) -> int:
     """Compute Top 50 by PL from report_values and insert into balancetes_top50.
 
     Uses Resumo report (relatorio='1') Patrimônio Líquido line.
@@ -267,9 +257,60 @@ def ingest_balancetes(
     _compute_and_insert_top50(con, ano_mes)
 
     con.execute(
-        "INSERT OR REPLACE INTO fetch_log (ano_mes, relatorio, row_count) "
-        "VALUES (?, ?, ?)",
+        "INSERT OR REPLACE INTO fetch_log (ano_mes, relatorio, row_count) VALUES (?, ?, ?)",
         [ano_mes, "balancetes", len(rows)],
     )
     logger.info("ingested_balancetes", ano_mes=ano_mes, rows=len(rows))
     return len(rows)
+
+
+def ingest_4010_batch(
+    con: duckdb.DuckDBPyConnection,
+    records: list[BalanceteRow],
+    ano_mes: int,
+) -> int:
+    """Insert 4010 balancete rows. Deletes only documento='4010' rows for the period."""
+    if not records:
+        return 0
+    rows = [
+        {
+            "ano_mes": r.ano_mes,
+            "cnpj": r.cnpj,
+            "cnpj8": r.cnpj8,
+            "nome_inst": r.nome_inst,
+            "atributo": r.atributo,
+            "documento": r.documento,
+            "conta": r.conta,
+            "nome_conta": r.nome_conta,
+            "saldo": r.saldo,
+        }
+        for r in records
+    ]
+    df = pl.DataFrame(rows)  # noqa: F841 — referenced by DuckDB SQL
+
+    con.execute(
+        "DELETE FROM balancetes_raw WHERE ano_mes = ? AND documento = '4010'",
+        [ano_mes],
+    )
+    con.execute("INSERT INTO balancetes_raw SELECT * FROM df")
+
+    con.execute(
+        "INSERT OR REPLACE INTO fetch_log (ano_mes, relatorio, row_count) VALUES (?, ?, ?)",
+        [ano_mes, "4010", len(rows)],
+    )
+    logger.info("ingested_4010", ano_mes=ano_mes, rows=len(rows))
+    return len(rows)
+
+
+def ingest_institution_mapping(
+    con: duckdb.DuckDBPyConnection,
+    mappings: list[dict[str, str | int | None]],
+) -> int:
+    """Insert CNPJ8 -> cod_conglomerado mapping. Replaces all existing rows."""
+    if not mappings:
+        return 0
+    df = pl.DataFrame(mappings)  # noqa: F841 — referenced by DuckDB SQL
+    con.execute("DELETE FROM institution_mapping")
+    con.execute("INSERT INTO institution_mapping SELECT * FROM df")
+    logger.info("ingested_institution_mapping", rows=len(mappings))
+    return len(mappings)

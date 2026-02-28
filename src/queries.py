@@ -183,8 +183,7 @@ def get_available_indicators(
 ) -> list[str]:
     """Return distinct indicator names (nome_linha) for a report type."""
     result = con.execute(
-        "SELECT DISTINCT nome_linha FROM report_values "
-        "WHERE relatorio = ? ORDER BY nome_linha",
+        "SELECT DISTINCT nome_linha FROM report_values WHERE relatorio = ? ORDER BY nome_linha",
         [relatorio],
     ).fetchall()
     return [row[0] for row in result]
@@ -249,6 +248,36 @@ def get_dre_indicators(
           AND relatorio = '4'
           AND nome_linha != 'Ativo Total'
         ORDER BY ano_mes, ordenacao
+    """
+    return con.execute(sql, [cod_conglomerado]).pl()
+
+
+def get_cosif_dre(
+    con: duckdb.DuckDBPyConnection,
+    cod_conglomerado: int,
+) -> pl.DataFrame:
+    """Build detailed DRE from COSIF 4010 data, aggregated across institutions.
+
+    Joins balancetes_raw (documento='4010') with institution_mapping to
+    aggregate saldo across all individual institutions in the conglomerado.
+    Filters to COSIF groups 7 (receitas) and 8 (despesas).
+
+    Returns: DataFrame [ano_mes, conta, nome_conta, saldo]
+    """
+    sql = """
+        SELECT
+            b.ano_mes,
+            b.conta,
+            b.nome_conta,
+            SUM(b.saldo) AS saldo
+        FROM balancetes_raw b
+        INNER JOIN institution_mapping m
+            ON b.cnpj8 = m.cnpj8
+        WHERE b.documento = '4010'
+          AND m.cod_conglomerado = ?
+          AND (b.conta LIKE '7.%' OR b.conta LIKE '8.%')
+        GROUP BY b.ano_mes, b.conta, b.nome_conta
+        ORDER BY b.ano_mes, b.conta
     """
     return con.execute(sql, [cod_conglomerado]).pl()
 
@@ -356,10 +385,14 @@ def get_balancetes_multi_kpi(
     """
     all_params: list[int | str] = [
         *params,
-        COSIF_ATIVO_TOTAL, COSIF_OPERACOES_CREDITO,
-        COSIF_DEPOSITOS, COSIF_RESULTADO_LIQUIDO,
-        COSIF_ATIVO_TOTAL, COSIF_OPERACOES_CREDITO,
-        COSIF_DEPOSITOS, COSIF_RESULTADO_LIQUIDO,
+        COSIF_ATIVO_TOTAL,
+        COSIF_OPERACOES_CREDITO,
+        COSIF_DEPOSITOS,
+        COSIF_RESULTADO_LIQUIDO,
+        COSIF_ATIVO_TOTAL,
+        COSIF_OPERACOES_CREDITO,
+        COSIF_DEPOSITOS,
+        COSIF_RESULTADO_LIQUIDO,
     ]
     return con.execute(sql, all_params).pl()
 
@@ -406,9 +439,13 @@ def get_balancetes_ratio_trend(
         ORDER BY ano_mes
     """
     params: list[str] = [
-        COSIF_PATRIMONIO_LIQUIDO, COSIF_ATIVO_TOTAL, COSIF_RESULTADO_LIQUIDO,
+        COSIF_PATRIMONIO_LIQUIDO,
+        COSIF_ATIVO_TOTAL,
+        COSIF_RESULTADO_LIQUIDO,
         cnpj8,
-        COSIF_PATRIMONIO_LIQUIDO, COSIF_ATIVO_TOTAL, COSIF_RESULTADO_LIQUIDO,
+        COSIF_PATRIMONIO_LIQUIDO,
+        COSIF_ATIVO_TOTAL,
+        COSIF_RESULTADO_LIQUIDO,
     ]
     df = con.execute(sql, params).pl()
     if df.is_empty():
@@ -644,9 +681,7 @@ def get_financial_ratios(
         FULL OUTER JOIN p4 ON COALESCE(p1.ano_mes, p5.ano_mes) = p4.ano_mes
         ORDER BY ano_mes
     """
-    return con.execute(
-        sql, [cod_conglomerado, cod_conglomerado, cod_conglomerado]
-    ).pl()
+    return con.execute(sql, [cod_conglomerado, cod_conglomerado, cod_conglomerado]).pl()
 
 
 def get_ratio_ranking(
@@ -660,11 +695,21 @@ def get_ratio_ranking(
     Returns: DataFrame [cod_conglomerado, nome_conglomerado, segmento, valor]
     """
     valid_ratios = {
-        "roe", "roa", "loan_to_deposit", "credit_intensity",
-        "securities_share", "leverage", "debt_equity",
-        "funding_dependency", "pr_coverage", "basileia",
-        "capital_principal", "capital_nivel1", "capital_excess",
-        "razao_alavancagem", "tax_rate",
+        "roe",
+        "roa",
+        "loan_to_deposit",
+        "credit_intensity",
+        "securities_share",
+        "leverage",
+        "debt_equity",
+        "funding_dependency",
+        "pr_coverage",
+        "basileia",
+        "capital_principal",
+        "capital_nivel1",
+        "capital_excess",
+        "razao_alavancagem",
+        "tax_rate",
     }
     if ratio_name not in valid_ratios:
         return pl.DataFrame(
@@ -691,7 +736,7 @@ def get_ratio_ranking(
             "THEN MAX(CASE WHEN rv.nome_linha LIKE '%ucro L%' THEN rv.valor_a END) "
             "/ MAX(CASE WHEN rv.nome_linha LIKE '%atrim%nio L%' "
             "AND rv.nome_linha NOT LIKE '%efer%' THEN rv.valor_a END) * 100 END",
-            "'1'"
+            "'1'",
         ),
         "roa": (
             "CASE WHEN MAX(CASE WHEN rv.nome_linha = 'Ativo Total' "
@@ -699,7 +744,7 @@ def get_ratio_ranking(
             "THEN MAX(CASE WHEN rv.nome_linha LIKE '%ucro L%' THEN rv.valor_a END) "
             "/ MAX(CASE WHEN rv.nome_linha = 'Ativo Total' "
             "THEN rv.valor_a END) * 100 END",
-            "'1'"
+            "'1'",
         ),
         "loan_to_deposit": (
             "CASE WHEN MAX(CASE WHEN rv.nome_linha LIKE '%apta%' "
@@ -708,7 +753,7 @@ def get_ratio_ranking(
             "AND rv.nome_linha NOT LIKE '%lass%' THEN rv.valor_a END) "
             "/ MAX(CASE WHEN rv.nome_linha LIKE '%apta%' "
             "THEN rv.valor_a END) * 100 END",
-            "'1'"
+            "'1'",
         ),
         "credit_intensity": (
             "CASE WHEN MAX(CASE WHEN rv.nome_linha = 'Ativo Total' "
@@ -717,7 +762,7 @@ def get_ratio_ranking(
             "AND rv.nome_linha NOT LIKE '%lass%' THEN rv.valor_a END) "
             "/ MAX(CASE WHEN rv.nome_linha = 'Ativo Total' "
             "THEN rv.valor_a END) * 100 END",
-            "'1'"
+            "'1'",
         ),
         "securities_share": (
             "CASE WHEN MAX(CASE WHEN rv.nome_linha = 'Ativo Total' "
@@ -726,7 +771,7 @@ def get_ratio_ranking(
             "THEN rv.valor_a END) "
             "/ MAX(CASE WHEN rv.nome_linha = 'Ativo Total' "
             "THEN rv.valor_a END) * 100 END",
-            "'1'"
+            "'1'",
         ),
         "leverage": (
             "CASE WHEN MAX(CASE WHEN rv.nome_linha LIKE '%atrim%nio L%' "
@@ -735,7 +780,7 @@ def get_ratio_ranking(
             "THEN rv.valor_a END) "
             "/ MAX(CASE WHEN rv.nome_linha LIKE '%atrim%nio L%' "
             "AND rv.nome_linha NOT LIKE '%efer%' THEN rv.valor_a END) END",
-            "'1'"
+            "'1'",
         ),
         "debt_equity": (
             "CASE WHEN MAX(CASE WHEN rv.nome_linha LIKE '%atrim%nio L%' "
@@ -744,7 +789,7 @@ def get_ratio_ranking(
             "AND rv.nome_linha NOT LIKE '%irculante%' THEN rv.valor_a END) "
             "/ MAX(CASE WHEN rv.nome_linha LIKE '%atrim%nio L%' "
             "AND rv.nome_linha NOT LIKE '%efer%' THEN rv.valor_a END) END",
-            "'1'"
+            "'1'",
         ),
         "funding_dependency": (
             "CASE WHEN MAX(CASE WHEN rv.nome_linha = 'Ativo Total' "
@@ -753,7 +798,7 @@ def get_ratio_ranking(
             "THEN rv.valor_a END) "
             "/ MAX(CASE WHEN rv.nome_linha = 'Ativo Total' "
             "THEN rv.valor_a END) * 100 END",
-            "'1'"
+            "'1'",
         ),
         "pr_coverage": (
             "CASE WHEN MAX(CASE WHEN rv.nome_linha = 'Ativo Total' "
@@ -762,32 +807,28 @@ def get_ratio_ranking(
             "THEN rv.valor_a END) "
             "/ MAX(CASE WHEN rv.nome_linha = 'Ativo Total' "
             "THEN rv.valor_a END) * 100 END",
-            "'1'"
+            "'1'",
         ),
         "basileia": (
-            "MAX(CASE WHEN rv.nome_linha LIKE '%asileia%' "
-            "THEN rv.valor_a END) * 100",
-            "'5'"
+            "MAX(CASE WHEN rv.nome_linha LIKE '%asileia%' THEN rv.valor_a END) * 100",
+            "'5'",
         ),
         "capital_principal": (
             "MAX(CASE WHEN rv.nome_linha LIKE '%ndice de Capital Principal' "
             "THEN rv.valor_a END) * 100",
-            "'5'"
+            "'5'",
         ),
         "capital_nivel1": (
-            "MAX(CASE WHEN rv.nome_linha LIKE '%apital N%vel I' "
-            "THEN rv.valor_a END) * 100",
-            "'5'"
+            "MAX(CASE WHEN rv.nome_linha LIKE '%apital N%vel I' THEN rv.valor_a END) * 100",
+            "'5'",
         ),
         "capital_excess": (
-            "(MAX(CASE WHEN rv.nome_linha LIKE '%asileia%' "
-            "THEN rv.valor_a END) - 0.105) * 100",
-            "'5'"
+            "(MAX(CASE WHEN rv.nome_linha LIKE '%asileia%' THEN rv.valor_a END) - 0.105) * 100",
+            "'5'",
         ),
         "razao_alavancagem": (
-            "MAX(CASE WHEN rv.nome_linha LIKE '%az%o de Alavancagem%' "
-            "THEN rv.valor_a END) * 100",
-            "'5'"
+            "MAX(CASE WHEN rv.nome_linha LIKE '%az%o de Alavancagem%' THEN rv.valor_a END) * 100",
+            "'5'",
         ),
         "tax_rate": (
             "CASE WHEN MAX(CASE WHEN rv.nome_linha LIKE '%esultado antes%' "
@@ -796,7 +837,7 @@ def get_ratio_ranking(
             "THEN rv.valor_a END) "
             "/ MAX(CASE WHEN rv.nome_linha LIKE '%esultado antes%' "
             "THEN rv.valor_a END) * 100 END",
-            "'4'"
+            "'4'",
         ),
     }
 
@@ -836,9 +877,7 @@ def get_market_share_pl(
         period_clause = "rv.ano_mes = ?"
         params.append(ano_mes)
     else:
-        period_clause = (
-            "rv.ano_mes = (SELECT MAX(ano_mes) FROM report_values)"
-        )
+        period_clause = "rv.ano_mes = (SELECT MAX(ano_mes) FROM report_values)"
 
     sql = f"""
         WITH pl_data AS (

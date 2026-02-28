@@ -19,6 +19,13 @@ from src.settings import Settings
 
 logger = structlog.get_logger()
 
+# 4010 CSV column indices (after skipping 3 metadata lines + header)
+_4010_COL_CNPJ = 2
+_4010_COL_NOME_INST = 4
+_4010_COL_CONTA = 8
+_4010_COL_NOME_CONTA = 9
+_4010_COL_SALDO = 10
+
 
 def generate_monthly_periods(n_months: int) -> list[int]:
     """Generate the last N monthly AAAAMM values, accounting for publication lag.
@@ -152,9 +159,7 @@ def _parse_csv_rows(csv_bytes: bytes, ano_mes: int) -> list[BalanceteRow]:
     return rows
 
 
-def fetch_balancetes(
-    client: httpx.Client, settings: Settings, ano_mes: int
-) -> list[BalanceteRow]:
+def fetch_balancetes(client: httpx.Client, settings: Settings, ano_mes: int) -> list[BalanceteRow]:
     """Orchestrate download, extraction, and parsing of balancete for a period."""
     primary, fallback = _build_zip_url(settings.balancetes_base_url, ano_mes)
     logger.info("fetching_balancete", ano_mes=ano_mes, url=primary)
@@ -163,3 +168,92 @@ def fetch_balancetes(
     rows = _parse_csv_rows(csv_bytes, ano_mes)
     logger.info("parsed_balancete", ano_mes=ano_mes, rows=len(rows))
     return rows
+
+
+# ─── 4010 Individual Balancete Functions ───
+
+
+def _build_4010_url(base_url: str, ano_mes: int, cnpj8: str) -> str:
+    """Build URL for individual 4010 balancete download.
+
+    Base URL for 4010: .../cont/balan/individualizados/{AAAAMM}/4010/{AAAAMM}-4010-{CNPJ8}.ZIP
+    The settings base_url points to .../cont/balan/bancos, so we strip '/bancos'.
+    """
+    base = base_url.replace("/bancos", "")
+    return f"{base}/individualizados/{ano_mes}/4010/{ano_mes}-4010-{cnpj8}.ZIP"
+
+
+def _compressed_to_dotted(code: str) -> str:
+    """Convert 8-digit compressed COSIF code to dotted format.
+
+    Example: '71100001' -> '7.1.1.00.00-1'
+    Format: X.Y.Z.WW.KK-D (8 digits: XYZWWKKD)
+    """
+    return f"{code[0]}.{code[1]}.{code[2]}.{code[3:5]}.{code[5:7]}-{code[7]}"
+
+
+def _parse_saldo_br(value: str) -> float:
+    """Parse Brazilian number format: '7.043.370,57' -> 7043370.57"""
+    return float(value.replace(".", "").replace(",", "."))
+
+
+def _parse_4010_csv(csv_bytes: bytes, ano_mes: int) -> list[BalanceteRow]:
+    """Parse 4010 CSV (3 metadata lines, then header + data, latin1, ';' separator).
+
+    Columns: DATA_BASE;DOCUMENTO;CNPJ;AGENCIA;NOME_INSTITUICAO;
+             COD_CONGL;NOME_CONGL;TAXONOMIA;CONTA;NOME_CONTA;SALDO[;...]
+    """
+    text = csv_bytes.decode("latin1")
+    lines = text.strip().splitlines()
+
+    # Skip 3 metadata lines + 1 header line (prefixed with #)
+    data_lines = [ln for ln in lines[3:] if ln.strip() and not ln.startswith("#")]
+    if not data_lines:
+        return []
+
+    rows: list[BalanceteRow] = []
+    for line in data_lines:
+        cols = line.split(";")
+        if len(cols) <= _4010_COL_SALDO:
+            continue
+
+        conta_compressed = cols[_4010_COL_CONTA].strip()
+        if len(conta_compressed) != 8:
+            continue
+
+        saldo_str = cols[_4010_COL_SALDO].strip()
+        if not saldo_str:
+            continue
+
+        cnpj_raw = cols[_4010_COL_CNPJ].strip()
+        rows.append(
+            BalanceteRow(
+                ano_mes=ano_mes,
+                cnpj=cnpj_raw,
+                cnpj8=cnpj_raw[:8],
+                nome_inst=cols[_4010_COL_NOME_INST].strip(),
+                atributo="",
+                documento="4010",
+                conta=_compressed_to_dotted(conta_compressed),
+                nome_conta=cols[_4010_COL_NOME_CONTA].strip(),
+                saldo=_parse_saldo_br(saldo_str),
+            )
+        )
+    return rows
+
+
+def fetch_4010_balancete(
+    client: httpx.Client,
+    base_url: str,
+    ano_mes: int,
+    cnpj8: str,
+) -> list[BalanceteRow]:
+    """Download, extract, and parse a single institution's 4010 balancete."""
+    url = _build_4010_url(base_url, ano_mes, cnpj8)
+    response = client.get(url)
+    if response.status_code == 404:
+        raise ZipNotAvailableError(ano_mes)
+    if response.status_code != 200:
+        raise ZipDownloadError(url, response.status_code)
+    csv_bytes = _extract_csv_from_zip(response.content)
+    return _parse_4010_csv(csv_bytes, ano_mes)

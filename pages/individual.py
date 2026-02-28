@@ -10,6 +10,7 @@ from dash import Input, Output, callback, dash_table, dcc, html
 from src.db import get_connection
 from src.queries import (
     get_capital_indicators,
+    get_cosif_dre,
     get_dre_indicators,
     get_institution_details,
     get_summary_indicators,
@@ -64,10 +65,7 @@ def _extract_latest_value(
     if df.is_empty():
         return None
     latest = df["ano_mes"].max()
-    mask = (
-        (df["ano_mes"] == latest)
-        & df["nome_linha"].str.contains(pattern)
-    )
+    mask = (df["ano_mes"] == latest) & df["nome_linha"].str.contains(pattern)
     if exclude:
         mask = mask & ~df["nome_linha"].str.contains(exclude)
     filtered = df.filter(mask)
@@ -153,10 +151,7 @@ def _build_big_numbers(
 ) -> html.Div:
     cards = []
     for label, value, fmt in metrics:
-        display = (
-            _format_pct(value) if fmt == "pct"
-            else _format_brl(value)
-        )
+        display = _format_pct(value) if fmt == "pct" else _format_brl(value)
         is_negative = value is not None and value < 0
         color = "#c00" if is_negative else "#1f77b4"
         value_style = {
@@ -218,9 +213,7 @@ def _build_report_table(df: pl.DataFrame, title: str) -> html.Div:
         values="valor_a",
         aggregate_function="first",
     )
-    period_cols = sorted(
-        [c for c in pivoted.columns if c != "nome_linha"]
-    )
+    period_cols = sorted([c for c in pivoted.columns if c != "nome_linha"])
     pivoted = pivoted.select(["nome_linha", *period_cols])
 
     pdf = pivoted.to_pandas()
@@ -232,9 +225,7 @@ def _build_report_table(df: pl.DataFrame, title: str) -> html.Div:
     for idx, row in pdf.iterrows():
         is_pct = _is_pct_indicator(str(row["nome_linha"]))
         for col in period_cols:
-            pdf.at[idx, col] = _fmt_table_value(
-                row[col], is_pct
-            )
+            pdf.at[idx, col] = _fmt_table_value(row[col], is_pct)
 
     columns = [{"name": "Indicador", "id": "nome_linha"}]
     for col in period_cols:
@@ -277,6 +268,68 @@ def _build_report_table(df: pl.DataFrame, title: str) -> html.Div:
     )
 
 
+def _build_cosif_dre_table(cosif_df: pl.DataFrame) -> html.Div:
+    """Build a pivoted DataTable from COSIF 4010 DRE data."""
+    pivoted = cosif_df.pivot(
+        on="ano_mes",
+        index=["conta", "nome_conta"],
+        values="saldo",
+        aggregate_function="first",
+    )
+    period_cols = sorted([c for c in pivoted.columns if c not in ("conta", "nome_conta")])
+    pivoted = pivoted.select(["conta", "nome_conta", *period_cols]).sort("conta")
+
+    pdf = pivoted.to_pandas()
+    pdf["indicador"] = pdf["conta"] + " - " + pdf["nome_conta"]
+    pdf = pdf.drop(columns=["conta", "nome_conta"])
+
+    for col in period_cols:
+        pdf[col] = pdf[col].apply(lambda v: f"{v:,.0f}" if v is not None and v == v else "")
+
+    columns = [{"name": "Conta", "id": "indicador"}]
+    for col in period_cols:
+        columns.append({"name": str(col), "id": str(col)})
+
+    return html.Div(
+        [
+            html.H3(
+                "DRE Detalhada — Balancete 4010 (COSIF)",
+                style={"marginTop": "24px", "marginBottom": "12px"},
+            ),
+            html.P(
+                "Dados agregados do Balancete 4010 individual. "
+                "Grupo 7 = Receitas, Grupo 8 = Despesas.",
+                style={"color": "#666", "fontSize": "12px", "marginBottom": "8px"},
+            ),
+            dash_table.DataTable(
+                data=pdf.to_dict("records"),
+                columns=columns,
+                page_size=40,
+                style_table={"overflowX": "auto"},
+                style_cell={
+                    "textAlign": "right",
+                    "padding": "6px 10px",
+                    "fontSize": "13px",
+                    "minWidth": "110px",
+                },
+                style_header={
+                    "fontWeight": "bold",
+                    "textAlign": "center",
+                },
+                style_data_conditional=[
+                    {
+                        "if": {"column_id": "indicador"},
+                        "textAlign": "left",
+                        "fontWeight": "bold",
+                        "minWidth": "350px",
+                    },
+                ],
+                sort_action="native",
+            ),
+        ]
+    )
+
+
 def _build_pivot_indicator_options(
     capital_df: pl.DataFrame,
     summary_df: pl.DataFrame,
@@ -292,10 +345,12 @@ def _build_pivot_indicator_options(
         if not df.is_empty():
             indicators = df["nome_linha"].unique().sort().to_list()
             for ind in indicators:
-                options.append({
-                    "label": f"[{label}] {ind}",
-                    "value": f"{report}|{ind}",
-                })
+                options.append(
+                    {
+                        "label": f"[{label}] {ind}",
+                        "value": f"{report}|{ind}",
+                    }
+                )
     return options
 
 
@@ -314,15 +369,11 @@ def _build_pivot_analysis(
 
     is_pct = _is_pct_indicator(indicator)
 
-    filtered = filtered.group_by("ano_mes").agg(
-        pl.col("valor_a").first()
-    )
+    filtered = filtered.group_by("ano_mes").agg(pl.col("valor_a").first())
 
     # Convert pct fractions to actual percentage for display
     if is_pct and comparison == "abs":
-        filtered = filtered.with_columns(
-            (pl.col("valor_a") * 100).alias("valor_a")
-        )
+        filtered = filtered.with_columns((pl.col("valor_a") * 100).alias("valor_a"))
 
     filtered = filtered.with_columns(
         (pl.col("ano_mes") // 100).alias("ano"),
@@ -368,11 +419,7 @@ def _build_pivot_analysis(
                     continue
                 pivoted = pivoted.with_columns(
                     pl.when(pl.col(col).shift(1).abs() > 0)
-                    .then(
-                        (pl.col(col) - pl.col(col).shift(1))
-                        / pl.col(col).shift(1).abs()
-                        * 100
-                    )
+                    .then((pl.col(col) - pl.col(col).shift(1)) / pl.col(col).shift(1).abs() * 100)
                     .otherwise(None)
                     .alias(col)
                 )
@@ -386,13 +433,9 @@ def _build_pivot_analysis(
 
     for q in quarter_cols:
         if q not in pivoted.columns and str(q) not in pivoted.columns:
-            pivoted = pivoted.with_columns(
-                pl.lit(None).cast(pl.Float64).alias(str(q))
-            )
+            pivoted = pivoted.with_columns(pl.lit(None).cast(pl.Float64).alias(str(q)))
 
-    rename_map = {
-        c: str(c) for c in pivoted.columns if isinstance(c, int)
-    }
+    rename_map = {c: str(c) for c in pivoted.columns if isinstance(c, int)}
     if rename_map:
         pivoted = pivoted.rename(rename_map)
 
@@ -400,7 +443,10 @@ def _build_pivot_analysis(
 
     # Format values for display
     month_labels = {
-        "3": "Mar", "6": "Jun", "9": "Set", "12": "Dez",
+        "3": "Mar",
+        "6": "Jun",
+        "9": "Set",
+        "12": "Dez",
     }
     is_variation = comparison != "abs"
     suffix = " (%)" if is_variation else ""
@@ -410,29 +456,22 @@ def _build_pivot_analysis(
         if qstr not in pdf.columns:
             continue
         if is_variation:
-            pdf[qstr] = pdf[qstr].apply(
-                lambda v: f"{v:+.1f}" if v is not None
-                and v == v else ""
-            )
+            pdf[qstr] = pdf[qstr].apply(lambda v: f"{v:+.1f}" if v is not None and v == v else "")
         elif is_pct:
-            pdf[qstr] = pdf[qstr].apply(
-                lambda v: f"{v:.2f}%" if v is not None
-                and v == v else ""
-            )
+            pdf[qstr] = pdf[qstr].apply(lambda v: f"{v:.2f}%" if v is not None and v == v else "")
         else:
-            pdf[qstr] = pdf[qstr].apply(
-                lambda v: f"{v:,.0f}" if v is not None
-                and v == v else ""
-            )
+            pdf[qstr] = pdf[qstr].apply(lambda v: f"{v:,.0f}" if v is not None and v == v else "")
 
     columns = [{"name": "Ano", "id": "ano"}]
     for q in quarter_cols:
         qstr = str(q)
         if qstr in pdf.columns:
-            columns.append({
-                "name": f"{month_labels[qstr]}{suffix}",
-                "id": qstr,
-            })
+            columns.append(
+                {
+                    "name": f"{month_labels[qstr]}{suffix}",
+                    "id": qstr,
+                }
+            )
 
     return dash_table.DataTable(
         data=pdf.to_dict("records"),
@@ -462,14 +501,10 @@ _DD_LABEL = {"fontWeight": "bold", "marginRight": "8px"}
 
 layout = html.Div(
     [
-        html.H2(
-            "Análise Individual", style={"marginBottom": "16px"}
-        ),
+        html.H2("Análise Individual", style={"marginBottom": "16px"}),
         html.Div(
             [
-                html.Label(
-                    "Instituição:", style={"fontWeight": "bold"}
-                ),
+                html.Label("Instituição:", style={"fontWeight": "bold"}),
                 dcc.Dropdown(
                     id="individual-institution",
                     placeholder="Selecione uma instituição...",
@@ -493,9 +528,7 @@ layout = html.Div(
                     [
                         html.Div(
                             [
-                                html.Label(
-                                    "Indicador:", style=_DD_LABEL
-                                ),
+                                html.Label("Indicador:", style=_DD_LABEL),
                                 dcc.Dropdown(
                                     id="pivot-indicator",
                                     placeholder="Selecione...",
@@ -510,9 +543,7 @@ layout = html.Div(
                         ),
                         html.Div(
                             [
-                                html.Label(
-                                    "Comparação:", style=_DD_LABEL
-                                ),
+                                html.Label("Comparação:", style=_DD_LABEL),
                                 dcc.Dropdown(
                                     id="pivot-comparison",
                                     options=[
@@ -622,41 +653,29 @@ def render_institution_content(
     dre_df = get_dre_indicators(con, cod_conglomerado)
 
     # ── Big numbers (latest period) ──
-    basileia_val = _extract_latest_value(
-        capital_df, "(?i)basileia", exclude="(?i)amplo"
-    )
-    lucro_val = _extract_latest_value(
-        summary_df, "(?i)lucro l"
-    )
+    basileia_val = _extract_latest_value(capital_df, "(?i)basileia", exclude="(?i)amplo")
+    lucro_val = _extract_latest_value(summary_df, "(?i)lucro l")
     metrics: list[tuple[str, float | None, str]] = [
         ("Lucro Líquido", lucro_val, "brl"),
         (
             "Patrimônio Líquido",
-            _extract_latest_value(
-                summary_df, "(?i)patrim.nio l"
-            ),
+            _extract_latest_value(summary_df, "(?i)patrim.nio l"),
             "brl",
         ),
         ("Índice de Basileia", basileia_val, "pct"),
         (
             "Ativo Total",
-            _extract_latest_value(
-                summary_df, "(?i)ativo total"
-            ),
+            _extract_latest_value(summary_df, "(?i)ativo total"),
             "brl",
         ),
         (
             "Captações",
-            _extract_latest_value(
-                summary_df, "(?i)capta"
-            ),
+            _extract_latest_value(summary_df, "(?i)capta"),
             "brl",
         ),
         (
             "Carteira de Crédito",
-            _extract_latest_value(
-                summary_df, "(?i)carteira de cr"
-            ),
+            _extract_latest_value(summary_df, "(?i)carteira de cr"),
             "brl",
         ),
     ]
@@ -670,9 +689,7 @@ def render_institution_content(
             & ~capital_df["nome_linha"].str.contains("(?i)amplo")
         )
         if not basileia.is_empty():
-            basileia = basileia.group_by("ano_mes").agg(
-                pl.col("valor_a").max()
-            )
+            basileia = basileia.group_by("ano_mes").agg(pl.col("valor_a").max())
             basileia = basileia.with_columns(
                 pl.col("ano_mes").cast(pl.Utf8).alias("periodo"),
                 (pl.col("valor_a") * 100).alias("valor_pct"),
@@ -709,22 +726,23 @@ def render_institution_content(
             "Indicadores de Capital (Relatório 5)",
         )
     )
-    tables.append(
-        _build_report_table(
-            summary_df, "Resumo (Relatório 1)"
-        )
-    )
+    tables.append(_build_report_table(summary_df, "Resumo (Relatório 1)"))
+    # COSIF 4010 detailed DRE (if available)
+    cosif_dre = get_cosif_dre(con, cod_conglomerado)
+    if not cosif_dre.is_empty():
+        tables.append(_build_cosif_dre_table(cosif_dre))
+
     tables.append(
         html.Div(
             [
                 _build_report_table(
                     dre_df,
-                    "DRE — Demonstração de Resultado (Relatório 4)",
+                    "DRE Resumida — IF.data (Relatório 4)",
                 ),
                 html.P(
                     "Nota: A DRE do IF.data contém apenas linhas resumidas. "
-                    "Receitas/despesas detalhadas (intermediação, serviços, "
-                    "pessoal) não estão disponíveis nesta fonte.",
+                    "Receitas/despesas detalhadas estão no Balancete 4010 acima "
+                    "(quando disponível).",
                     style={
                         "color": "#888",
                         "fontSize": "12px",
@@ -747,10 +765,7 @@ def render_institution_content(
                     ),
                     dash_table.DataTable(
                         data=raw_pdf.to_dict("records"),
-                        columns=[
-                            {"name": c, "id": c}
-                            for c in raw_pdf.columns
-                        ],
+                        columns=[{"name": c, "id": c} for c in raw_pdf.columns],
                         page_size=20,
                         style_table={"overflowX": "auto"},
                         style_cell={
@@ -766,17 +781,11 @@ def render_institution_content(
         )
 
     # ── Pivot indicator options ──
-    pivot_options = _build_pivot_indicator_options(
-        capital_df, summary_df, dre_df
-    )
-    default_ind = (
-        pivot_options[0]["value"] if pivot_options else None
-    )
+    pivot_options = _build_pivot_indicator_options(capital_df, summary_df, dre_df)
+    default_ind = pivot_options[0]["value"] if pivot_options else None
     show = {"display": "block"} if pivot_options else hidden
 
-    report_tables = (
-        html.Div(tables) if tables else html.Div()
-    )
+    report_tables = html.Div(tables) if tables else html.Div()
 
     return (
         details_card,
@@ -809,9 +818,7 @@ def render_pivot_table(
 
     parts = indicator_encoded.split("|", 1)
     if len(parts) != 2:
-        return html.P(
-            "Indicador inválido.", style={"color": "#c00"}
-        )
+        return html.P("Indicador inválido.", style={"color": "#c00"})
     report, indicator = parts
 
     query_map = {
@@ -821,9 +828,7 @@ def render_pivot_table(
     }
     query_fn = query_map.get(report)
     if not query_fn:
-        return html.P(
-            "Relatório inválido.", style={"color": "#c00"}
-        )
+        return html.P("Relatório inválido.", style={"color": "#c00"})
 
     df = query_fn(con, cod_conglomerado)
     return _build_pivot_analysis(df, indicator, comparison)

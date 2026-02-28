@@ -63,6 +63,14 @@ CREATE TABLE IF NOT EXISTS balancetes_raw (
 CREATE INDEX IF NOT EXISTS idx_bal_raw_lookup
     ON balancetes_raw (ano_mes, conta, cnpj8);
 
+CREATE TABLE IF NOT EXISTS institution_mapping (
+    cnpj8              VARCHAR NOT NULL,
+    nome_inst          VARCHAR NOT NULL,
+    cod_conglomerado   INTEGER,
+    nome_conglomerado  VARCHAR,
+    PRIMARY KEY (cnpj8)
+);
+
 CREATE TABLE IF NOT EXISTS balancetes_top50 (
     ano_mes            INTEGER NOT NULL,
     rank               INTEGER NOT NULL,
