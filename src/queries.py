@@ -23,23 +23,31 @@ BALANCETES_KPI_MAP: dict[str, str] = {
 def list_institutions(
     con: duckdb.DuckDBPyConnection,
     segmento: str | None = None,
+    cod_conglomerados: list[int] | None = None,
 ) -> pl.DataFrame:
-    """Return distinct institutions, optionally filtered by segment.
+    """Return distinct institutions, optionally filtered by segment and/or list.
 
     Uses the most recent cadastro period available.
     Returns: DataFrame [cod_conglomerado, nome_conglomerado, segmento]
     """
-    params: list[str] = []
+    params: list[str | int] = []
     seg_filter = ""
     if segmento and segmento != "ALL":
         seg_filter = "AND segmento = ?"
         params.append(segmento)
+
+    cong_filter = ""
+    if cod_conglomerados:
+        placeholders = ", ".join(["?"] * len(cod_conglomerados))
+        cong_filter = f"AND cod_conglomerado IN ({placeholders})"
+        params.extend(cod_conglomerados)
 
     sql = f"""
         SELECT DISTINCT cod_conglomerado, nome_conglomerado, segmento
         FROM cadastro
         WHERE ano_mes = (SELECT MAX(ano_mes) FROM cadastro)
         {seg_filter}
+        {cong_filter}
         ORDER BY nome_conglomerado
     """
     return con.execute(sql, params).pl()
