@@ -365,6 +365,29 @@ def get_cosif_dre_4040(
     return con.execute(sql, [cod_conglomerado, cod_conglomerado]).pl()
 
 
+def desacumulate_dre_semesters(dre_df: pl.DataFrame) -> pl.DataFrame:
+    """Convert semester-accumulated DRE balances to monthly values.
+
+    COSIF DRE accounts (groups 7/8) accumulate within each fiscal semester
+    (Jan-Jun, Jul-Dec) and reset at the start of the next semester.
+    This function subtracts the previous month's accumulated balance
+    to recover each month's individual contribution.
+    """
+    if dre_df.is_empty():
+        return dre_df
+
+    year = pl.col("ano_mes") // 100
+    month = pl.col("ano_mes") % 100
+    semester = year * 2 + (month >= 7).cast(pl.Int64)
+
+    prev = pl.col("saldo").shift(1).over(["conta", semester])
+    monthly = pl.col("saldo") - prev.fill_null(0)
+
+    return dre_df.sort("conta", "ano_mes").with_columns(
+        monthly.alias("saldo")
+    )
+
+
 def compute_dre_subtotals(dre_df: pl.DataFrame) -> pl.DataFrame:
     """Add subtotal rows and ordering to a COSIF DRE DataFrame.
 

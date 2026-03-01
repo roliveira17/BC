@@ -20,6 +20,7 @@ from src.queries import (
     compare_institutions,
     compare_pl_trend,
     compute_dre_subtotals,
+    desacumulate_dre_semesters,
     get_available_indicators,
     get_available_periods,
     get_balancetes_kpi_trend,
@@ -703,7 +704,14 @@ class TestComparePlTrend:
 
 
 def _seed_cosif_dre_4040(con: duckdb.DuckDBPyConnection) -> None:
-    """Seed institution_mapping + balancetes_raw for COSIF 4040 DRE tests."""
+    """Seed institution_mapping + balancetes_raw for COSIF 4040 DRE tests.
+
+    4 periods across two semesters with accumulated balances:
+      202411 (H2-Nov): base accumulated values
+      202412 (H2-Dec): higher accumulated values (same semester)
+      202501 (H1-Jan): reset — new semester starts fresh
+      202502 (H1-Feb): accumulated on top of Jan
+    """
     ingest_institution_mapping(con, [
         {
             "cnpj8": "11111111",
@@ -713,18 +721,27 @@ def _seed_cosif_dre_4040(con: duckdb.DuckDBPyConnection) -> None:
         },
     ])
 
-    accounts: list[tuple[str, str, float]] = [
-        ("7.1.0.00.00-8", "RECEITAS DE INTERMEDIAÇÃO FINANCEIRA", 10000.0),
-        ("7.3.0.00.00-6", "RECEITAS DE PRESTAÇÃO DE SERVIÇOS", 2000.0),
-        ("7.7.0.00.00-2", "OUTRAS RECEITAS OPERACIONAIS", 500.0),
-        ("7.9.0.00.00-0", "RESULTADO NÃO OPERACIONAL", 300.0),
-        ("8.1.0.00.00-5", "DESPESAS DE INTERMEDIAÇÃO FINANCEIRA", -6000.0),
-        ("8.3.0.00.00-3", "OUTRAS DESPESAS ADMINISTRATIVAS", -1500.0),
-        ("8.7.0.00.00-9", "DESPESAS TRIBUTÁRIAS", -800.0),
+    # (conta, nome, saldo_202411, saldo_202412, saldo_202501, saldo_202502)
+    accounts: list[tuple[str, str, float, float, float, float]] = [
+        ("7.1.0.00.00-8", "RECEITAS DE INTERMEDIAÇÃO FINANCEIRA",
+         50000.0, 60000.0, 10000.0, 22000.0),
+        ("7.3.0.00.00-6", "RECEITAS DE PRESTAÇÃO DE SERVIÇOS",
+         10000.0, 12000.0, 2000.0, 4500.0),
+        ("7.7.0.00.00-2", "OUTRAS RECEITAS OPERACIONAIS",
+         2500.0, 3000.0, 500.0, 1100.0),
+        ("7.9.0.00.00-0", "RESULTADO NÃO OPERACIONAL",
+         1500.0, 1800.0, 300.0, 650.0),
+        ("8.1.0.00.00-5", "DESPESAS DE INTERMEDIAÇÃO FINANCEIRA",
+         -30000.0, -36000.0, -6000.0, -13000.0),
+        ("8.3.0.00.00-3", "OUTRAS DESPESAS ADMINISTRATIVAS",
+         -7500.0, -9000.0, -1500.0, -3200.0),
+        ("8.7.0.00.00-9", "DESPESAS TRIBUTÁRIAS",
+         -4000.0, -4800.0, -800.0, -1700.0),
     ]
-    level3_account = ("7.1.1.00.00-5", "RENDAS DE OPERAÇÕES DE CRÉDITO", 5000.0)
+    level3_account = ("7.1.1.00.00-5", "RENDAS DE OPERAÇÕES DE CRÉDITO")
 
-    for ano_mes in [202501, 202412]:
+    periods_and_idx = [(202411, 0), (202412, 1), (202501, 2), (202502, 3)]
+    for ano_mes, idx in periods_and_idx:
         rows = [
             BalanceteRow(
                 ano_mes=ano_mes,
@@ -735,9 +752,9 @@ def _seed_cosif_dre_4040(con: duckdb.DuckDBPyConnection) -> None:
                 documento="4010",
                 conta=conta,
                 nome_conta=nome,
-                saldo=saldo,
+                saldo=[s0, s1, s2, s3][idx],
             )
-            for conta, nome, saldo in accounts
+            for conta, nome, s0, s1, s2, s3 in accounts
         ]
         rows.append(
             BalanceteRow(
@@ -749,7 +766,7 @@ def _seed_cosif_dre_4040(con: duckdb.DuckDBPyConnection) -> None:
                 documento="4010",
                 conta=level3_account[0],
                 nome_conta=level3_account[1],
-                saldo=level3_account[2],
+                saldo=5000.0,
             )
         )
         ingest_balancetes(con, rows, ano_mes)
@@ -772,9 +789,9 @@ class TestGetCosifDre4040:
         _seed_cosif_dre_4040(db_con)
         result = get_cosif_dre_4040(db_con, 1)
         periods = result["ano_mes"].unique().to_list()
-        assert len(periods) == 2
-        assert 202501 in periods
-        assert 202412 in periods
+        assert len(periods) == 4
+        for p in [202411, 202412, 202501, 202502]:
+            assert p in periods
 
     def test_empty_for_unknown_conglomerate(
         self, db_con: duckdb.DuckDBPyConnection
@@ -792,19 +809,94 @@ class TestGetCosifDre4040:
         assert "7.1.1.00.00" not in contas
 
 
+class TestDesacumulateDreSemesters:
+    def test_within_same_semester(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        """Dec = accumulated_Dec - accumulated_Nov (same H2 semester)."""
+        _seed_cosif_dre_4040(db_con)
+        dre = get_cosif_dre_4040(db_con, 1)
+        result = desacumulate_dre_semesters(dre)
+        dec_71 = result.filter(
+            (pl.col("conta") == "7.1.0.00.00")
+            & (pl.col("ano_mes") == 202412)
+        )
+        # 60000 - 50000 = 10000
+        assert dec_71["saldo"][0] == 10000.0
+
+    def test_resets_at_semester_boundary(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        """Jan (first month of H1) keeps its accumulated value as-is."""
+        _seed_cosif_dre_4040(db_con)
+        dre = get_cosif_dre_4040(db_con, 1)
+        result = desacumulate_dre_semesters(dre)
+        jan_71 = result.filter(
+            (pl.col("conta") == "7.1.0.00.00")
+            & (pl.col("ano_mes") == 202501)
+        )
+        # First month of new semester: 10000 - 0 = 10000
+        assert jan_71["saldo"][0] == 10000.0
+
+    def test_second_month_in_new_semester(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        """Feb = accumulated_Feb - accumulated_Jan (same H1 semester)."""
+        _seed_cosif_dre_4040(db_con)
+        dre = get_cosif_dre_4040(db_con, 1)
+        result = desacumulate_dre_semesters(dre)
+        feb_71 = result.filter(
+            (pl.col("conta") == "7.1.0.00.00")
+            & (pl.col("ano_mes") == 202502)
+        )
+        # 22000 - 10000 = 12000
+        assert feb_71["saldo"][0] == 12000.0
+
+    def test_empty_returns_empty(self) -> None:
+        empty = pl.DataFrame(schema={
+            "ano_mes": pl.Int64,
+            "conta": pl.Utf8,
+            "nome_conta": pl.Utf8,
+            "saldo": pl.Float64,
+        })
+        result = desacumulate_dre_semesters(empty)
+        assert result.is_empty()
+
+    def test_accounts_desacumulate_independently(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        """Each account desacumulates within its own group."""
+        _seed_cosif_dre_4040(db_con)
+        dre = get_cosif_dre_4040(db_con, 1)
+        result = desacumulate_dre_semesters(dre)
+        # Check 8.1 account (despesas) for Dec: -36000 - (-30000) = -6000
+        dec_81 = result.filter(
+            (pl.col("conta") == "8.1.0.00.00")
+            & (pl.col("ano_mes") == 202412)
+        )
+        assert dec_81["saldo"][0] == -6000.0
+        # Check 7.3 account for Feb: 4500 - 2000 = 2500
+        feb_73 = result.filter(
+            (pl.col("conta") == "7.3.0.00.00")
+            & (pl.col("ano_mes") == 202502)
+        )
+        assert feb_73["saldo"][0] == 2500.0
+
+
 class TestComputeDreSubtotals:
     def test_adds_resultado_bruto(
         self, db_con: duckdb.DuckDBPyConnection
     ) -> None:
         _seed_cosif_dre_4040(db_con)
         dre = get_cosif_dre_4040(db_con, 1)
-        result = compute_dre_subtotals(dre)
+        monthly = desacumulate_dre_semesters(dre)
+        result = compute_dre_subtotals(monthly)
         bruto = result.filter(
             (pl.col("conta") == "RESULTADO BRUTO")
             & (pl.col("ano_mes") == 202501)
         )
         assert bruto.shape[0] == 1
-        # 10000 + (-6000) = 4000
+        # Monthly Jan: 7.1=10000, 8.1=-6000 → bruto=4000
         assert bruto["saldo"][0] == 4000.0
 
     def test_adds_resultado_operacional(
@@ -812,13 +904,14 @@ class TestComputeDreSubtotals:
     ) -> None:
         _seed_cosif_dre_4040(db_con)
         dre = get_cosif_dre_4040(db_con, 1)
-        result = compute_dre_subtotals(dre)
+        monthly = desacumulate_dre_semesters(dre)
+        result = compute_dre_subtotals(monthly)
         operacional = result.filter(
             (pl.col("conta") == "RESULTADO OPERACIONAL")
             & (pl.col("ano_mes") == 202501)
         )
         assert operacional.shape[0] == 1
-        # all except 7.9: 10000 + 2000 + 500 + (-6000) + (-1500) + (-800) = 4200
+        # Monthly Jan (all except 7.9): 10000 + 2000 + 500 + (-6000) + (-1500) + (-800) = 4200
         assert operacional["saldo"][0] == 4200.0
 
     def test_ordering_is_correct(
@@ -826,7 +919,8 @@ class TestComputeDreSubtotals:
     ) -> None:
         _seed_cosif_dre_4040(db_con)
         dre = get_cosif_dre_4040(db_con, 1)
-        result = compute_dre_subtotals(dre)
+        monthly = desacumulate_dre_semesters(dre)
+        result = compute_dre_subtotals(monthly)
         period = result.filter(pl.col("ano_mes") == 202501)
         orderings = period["ordering"].to_list()
         assert orderings == sorted(orderings)

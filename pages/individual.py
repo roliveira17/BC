@@ -10,6 +10,7 @@ from dash import Input, Output, callback, dash_table, dcc, html
 from src.db import get_connection
 from src.queries import (
     compute_dre_subtotals,
+    desacumulate_dre_semesters,
     get_capital_indicators,
     get_cosif_dre,
     get_cosif_dre_4040,
@@ -352,6 +353,11 @@ def _build_dre_resumida_table(dre_df: pl.DataFrame) -> html.Div:
     )
     drop_cols = [c for c in all_period_cols if c not in period_cols]
 
+    cols_for_12m = period_cols[-12:]
+    pivoted = pivoted.with_columns(
+        pl.sum_horizontal(cols_for_12m).alias("Acum. 12M")
+    )
+
     pdf = pivoted.to_pandas()
     pdf["indicador"] = pdf.apply(
         lambda row: row["nome_conta"]
@@ -361,7 +367,8 @@ def _build_dre_resumida_table(dre_df: pl.DataFrame) -> html.Div:
     )
     pdf = pdf.drop(columns=["conta", "nome_conta", "ordering", *drop_cols])
 
-    for col in period_cols:
+    fmt_cols = [*period_cols, "Acum. 12M"]
+    for col in fmt_cols:
         pdf[col] = pdf[col].apply(
             lambda v: f"{v:,.0f}" if v is not None and v == v else ""
         )
@@ -369,6 +376,7 @@ def _build_dre_resumida_table(dre_df: pl.DataFrame) -> html.Div:
     columns = [{"name": "Conta", "id": "indicador"}]
     for col in period_cols:
         columns.append({"name": str(col), "id": str(col)})
+    columns.append({"name": "Acum. 12M", "id": "Acum. 12M"})
 
     return html.Div(
         [
@@ -413,6 +421,11 @@ def _build_dre_resumida_table(dre_df: pl.DataFrame) -> html.Div:
                         },
                         "fontWeight": "bold",
                         "backgroundColor": "#f0f0f0",
+                    },
+                    {
+                        "if": {"column_id": "Acum. 12M"},
+                        "fontWeight": "bold",
+                        "backgroundColor": "#e8f4fd",
                     },
                 ],
                 sort_action="native",
@@ -826,7 +839,8 @@ def render_institution_content(
     # COSIF 4040 summarized DRE (if available)
     cosif_dre_4040 = get_cosif_dre_4040(con, cod_conglomerado)
     if not cosif_dre_4040.is_empty():
-        dre_with_subtotals = compute_dre_subtotals(cosif_dre_4040)
+        cosif_dre_monthly = desacumulate_dre_semesters(cosif_dre_4040)
+        dre_with_subtotals = compute_dre_subtotals(cosif_dre_monthly)
         tables.append(_build_dre_resumida_table(dre_with_subtotals))
 
     tables.append(
