@@ -843,54 +843,6 @@ def render_institution_content(
         dre_with_subtotals = compute_dre_subtotals(cosif_dre_monthly)
         tables.append(_build_dre_resumida_table(dre_with_subtotals))
 
-    tables.append(
-        html.Div(
-            [
-                _build_report_table(
-                    dre_df,
-                    "DRE Resumida — IF.data (Relatório 4)",
-                ),
-                html.P(
-                    "Nota: A DRE do IF.data contém apenas linhas resumidas. "
-                    "Receitas/despesas detalhadas estão no Balancete 4010 acima "
-                    "(quando disponível).",
-                    style={
-                        "color": "#888",
-                        "fontSize": "12px",
-                        "marginTop": "4px",
-                    },
-                ),
-            ]
-        )
-    )
-
-    # Raw data table (keep existing)
-    if not capital_df.is_empty():
-        raw_pdf = capital_df.to_pandas()
-        tables.append(
-            html.Div(
-                [
-                    html.H3(
-                        "Dados Brutos — Capital",
-                        style={"marginTop": "24px"},
-                    ),
-                    dash_table.DataTable(
-                        data=raw_pdf.to_dict("records"),
-                        columns=[{"name": c, "id": c} for c in raw_pdf.columns],
-                        page_size=20,
-                        style_table={"overflowX": "auto"},
-                        style_cell={
-                            "textAlign": "left",
-                            "padding": "8px",
-                        },
-                        style_header={"fontWeight": "bold"},
-                        sort_action="native",
-                        filter_action="native",
-                    ),
-                ]
-            )
-        )
-
     # ── Pivot indicator options ──
     pivot_options = _build_pivot_indicator_options(capital_df, summary_df, dre_df)
     default_ind = pivot_options[0]["value"] if pivot_options else None
