@@ -502,32 +502,34 @@ def list_balancetes_periods(con: duckdb.DuckDBPyConnection) -> list[int]:
     return [row[0] for row in result]
 
 
+_RV_ATIVO = "Ativo Total"
+_RV_CREDITO = "Carteira de Crédito"
+_RV_DEPOSITOS = "Captações"
+_RV_RESULTADO = "Lucro Líquido"
+
+
 def get_balancetes_multi_kpi(
     con: duckdb.DuckDBPyConnection,
     ano_mes: int | None = None,
 ) -> pl.DataFrame:
-    """Return Top 50 institutions with multiple COSIF KPIs for a given period.
+    """Return Top 50 institutions with KPIs from IF.data Report 1 for a given period.
 
-    Joins balancetes_top50 (ranking) with balancetes_raw (additional accounts).
+    Joins balancetes_top50 (ranking/PL) with report_values (Ativo Total,
+    Carteira de Crédito, Captações, Lucro Líquido) on cod_conglomerado.
     Returns: DataFrame [rank, cnpj8, nome_inst, cod_conglomerado,
              nome_conglomerado, patrimonio_liquido, ativo_total,
              operacoes_credito, depositos, resultado_liquido]
     """
-    params: list[int] = []
     if ano_mes is not None:
         top50_filter = "ano_mes = ?"
-        raw_filter = (
-            "r.ano_mes = (SELECT MAX(ano_mes) FROM balancetes_raw"
-            " WHERE ano_mes <= ?)"
-        )
-        params = [ano_mes, ano_mes]
+        kpi_filter = "rv.ano_mes = ?"
+        params: list[int | str] = [ano_mes, ano_mes]
     else:
         top50_filter = "ano_mes = (SELECT MAX(ano_mes) FROM balancetes_top50)"
-        raw_filter = (
-            "r.ano_mes = (SELECT MAX(ano_mes) FROM balancetes_raw"
-            " WHERE ano_mes <= (SELECT MAX(ano_mes) FROM balancetes_top50))"
-        )
+        kpi_filter = "rv.ano_mes = (SELECT MAX(ano_mes) FROM balancetes_top50)"
+        params = []
 
+    rv_lines = [_RV_ATIVO, _RV_CREDITO, _RV_DEPOSITOS, _RV_RESULTADO]
     sql = f"""
         WITH top50 AS (
             SELECT cnpj8, nome_inst, rank, patrimonio_liquido,
@@ -536,40 +538,28 @@ def get_balancetes_multi_kpi(
             WHERE {top50_filter}
         ),
         kpis AS (
-            SELECT m.cod_conglomerado, r.conta, SUM(r.saldo) AS saldo
-            FROM balancetes_raw r
-            INNER JOIN institution_mapping m ON r.cnpj8 = m.cnpj8
-            WHERE {raw_filter}
-              AND r.conta IN (?, ?, ?, ?)
-            GROUP BY m.cod_conglomerado, r.conta
+            SELECT rv.cod_conglomerado, rv.nome_linha, rv.valor_a
+            FROM report_values rv
+            WHERE {kpi_filter}
+              AND rv.relatorio = '1'
+              AND rv.nome_linha IN (?, ?, ?, ?)
         )
         SELECT
             t.rank, t.cnpj8, t.nome_inst,
             t.cod_conglomerado, t.nome_conglomerado,
             t.patrimonio_liquido,
-            MAX(CASE WHEN k.conta = ? THEN k.saldo END) AS ativo_total,
-            MAX(CASE WHEN k.conta = ? THEN k.saldo END) AS operacoes_credito,
-            MAX(CASE WHEN k.conta = ? THEN k.saldo END) AS depositos,
-            MAX(CASE WHEN k.conta = ? THEN k.saldo END) AS resultado_liquido
+            MAX(CASE WHEN k.nome_linha = ? THEN k.valor_a END) AS ativo_total,
+            MAX(CASE WHEN k.nome_linha = ? THEN k.valor_a END) AS operacoes_credito,
+            MAX(CASE WHEN k.nome_linha = ? THEN k.valor_a END) AS depositos,
+            MAX(CASE WHEN k.nome_linha = ? THEN k.valor_a END) AS resultado_liquido
         FROM top50 t
-        LEFT JOIN institution_mapping im ON t.cnpj8 = im.cnpj8
-        LEFT JOIN kpis k ON im.cod_conglomerado = k.cod_conglomerado
+        LEFT JOIN kpis k ON t.cod_conglomerado = k.cod_conglomerado
         GROUP BY t.rank, t.cnpj8, t.nome_inst,
                  t.cod_conglomerado, t.nome_conglomerado,
                  t.patrimonio_liquido
         ORDER BY t.rank
     """
-    all_params: list[int | str] = [
-        *params,
-        COSIF_ATIVO_TOTAL,
-        COSIF_OPERACOES_CREDITO,
-        COSIF_DEPOSITOS,
-        COSIF_RESULTADO_LIQUIDO,
-        COSIF_ATIVO_TOTAL,
-        COSIF_OPERACOES_CREDITO,
-        COSIF_DEPOSITOS,
-        COSIF_RESULTADO_LIQUIDO,
-    ]
+    all_params: list[int | str] = [*params, *rv_lines, *rv_lines]
     return con.execute(sql, all_params).pl()
 
 
