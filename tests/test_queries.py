@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import duckdb
+import polars as pl
 
-from src.ingest import ingest_balancetes, ingest_cadastro, ingest_report_values
+from src.ingest import (
+    ingest_balancetes,
+    ingest_cadastro,
+    ingest_institution_mapping,
+    ingest_report_values,
+)
 from src.models import BalanceteRow, InstitutionRecord, ReportValue
 from src.queries import (
     BALANCETES_KPI_MAP,
@@ -13,6 +19,7 @@ from src.queries import (
     COSIF_RESULTADO_LIQUIDO,
     compare_institutions,
     compare_pl_trend,
+    compute_dre_subtotals,
     get_available_indicators,
     get_available_periods,
     get_balancetes_kpi_trend,
@@ -21,6 +28,7 @@ from src.queries import (
     get_balancetes_top50,
     get_balancetes_trend,
     get_capital_indicators,
+    get_cosif_dre_4040,
     get_institution_details,
     get_segment_ranking,
     get_summary_indicators,
@@ -689,3 +697,147 @@ class TestComparePlTrend:
         _seed_combined(db_con)
         result = compare_pl_trend(db_con, ["99999999"])
         assert result.shape[0] == 0
+
+
+# --- COSIF 4040 DRE Tests ---
+
+
+def _seed_cosif_dre_4040(con: duckdb.DuckDBPyConnection) -> None:
+    """Seed institution_mapping + balancetes_raw for COSIF 4040 DRE tests."""
+    ingest_institution_mapping(con, [
+        {
+            "cnpj8": "11111111",
+            "nome_inst": "BANCO A",
+            "cod_conglomerado": 1,
+            "nome_conglomerado": "CONGLOM A",
+        },
+    ])
+
+    accounts: list[tuple[str, str, float]] = [
+        ("7.1.0.00.00-8", "RECEITAS DE INTERMEDIAÇÃO FINANCEIRA", 10000.0),
+        ("7.3.0.00.00-6", "RECEITAS DE PRESTAÇÃO DE SERVIÇOS", 2000.0),
+        ("7.7.0.00.00-2", "OUTRAS RECEITAS OPERACIONAIS", 500.0),
+        ("7.9.0.00.00-0", "RESULTADO NÃO OPERACIONAL", 300.0),
+        ("8.1.0.00.00-5", "DESPESAS DE INTERMEDIAÇÃO FINANCEIRA", -6000.0),
+        ("8.3.0.00.00-3", "OUTRAS DESPESAS ADMINISTRATIVAS", -1500.0),
+        ("8.7.0.00.00-9", "DESPESAS TRIBUTÁRIAS", -800.0),
+    ]
+    level3_account = ("7.1.1.00.00-5", "RENDAS DE OPERAÇÕES DE CRÉDITO", 5000.0)
+
+    for ano_mes in [202501, 202412]:
+        rows = [
+            BalanceteRow(
+                ano_mes=ano_mes,
+                cnpj="11111111000100",
+                cnpj8="11111111",
+                nome_inst="BANCO A",
+                atributo="A",
+                documento="4040",
+                conta=conta,
+                nome_conta=nome,
+                saldo=saldo,
+            )
+            for conta, nome, saldo in accounts
+        ]
+        rows.append(
+            BalanceteRow(
+                ano_mes=ano_mes,
+                cnpj="11111111000100",
+                cnpj8="11111111",
+                nome_inst="BANCO A",
+                atributo="A",
+                documento="4040",
+                conta=level3_account[0],
+                nome_conta=level3_account[1],
+                saldo=level3_account[2],
+            )
+        )
+        ingest_balancetes(con, rows, ano_mes)
+
+
+class TestGetCosifDre4040:
+    def test_returns_level2_accounts(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        _seed_cosif_dre_4040(db_con)
+        result = get_cosif_dre_4040(db_con, 1)
+        contas = result["conta"].unique().to_list()
+        assert "7.1.0.00.00" in contas
+        assert "8.1.0.00.00" in contas
+        assert len(contas) == 7
+
+    def test_returns_multiple_periods(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        _seed_cosif_dre_4040(db_con)
+        result = get_cosif_dre_4040(db_con, 1)
+        periods = result["ano_mes"].unique().to_list()
+        assert len(periods) == 2
+        assert 202501 in periods
+        assert 202412 in periods
+
+    def test_empty_for_unknown_conglomerate(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        _seed_cosif_dre_4040(db_con)
+        result = get_cosif_dre_4040(db_con, 999)
+        assert result.is_empty()
+
+    def test_excludes_non_level2_accounts(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        _seed_cosif_dre_4040(db_con)
+        result = get_cosif_dre_4040(db_con, 1)
+        contas = result["conta"].unique().to_list()
+        assert "7.1.1.00.00" not in contas
+
+
+class TestComputeDreSubtotals:
+    def test_adds_resultado_bruto(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        _seed_cosif_dre_4040(db_con)
+        dre = get_cosif_dre_4040(db_con, 1)
+        result = compute_dre_subtotals(dre)
+        bruto = result.filter(
+            (pl.col("conta") == "RESULTADO BRUTO")
+            & (pl.col("ano_mes") == 202501)
+        )
+        assert bruto.shape[0] == 1
+        # 10000 + (-6000) = 4000
+        assert bruto["saldo"][0] == 4000.0
+
+    def test_adds_resultado_operacional(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        _seed_cosif_dre_4040(db_con)
+        dre = get_cosif_dre_4040(db_con, 1)
+        result = compute_dre_subtotals(dre)
+        operacional = result.filter(
+            (pl.col("conta") == "RESULTADO OPERACIONAL")
+            & (pl.col("ano_mes") == 202501)
+        )
+        assert operacional.shape[0] == 1
+        # all except 7.9: 10000 + 2000 + 500 + (-6000) + (-1500) + (-800) = 4200
+        assert operacional["saldo"][0] == 4200.0
+
+    def test_ordering_is_correct(
+        self, db_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        _seed_cosif_dre_4040(db_con)
+        dre = get_cosif_dre_4040(db_con, 1)
+        result = compute_dre_subtotals(dre)
+        period = result.filter(pl.col("ano_mes") == 202501)
+        orderings = period["ordering"].to_list()
+        assert orderings == sorted(orderings)
+
+    def test_empty_input_returns_empty(self) -> None:
+        empty = pl.DataFrame(schema={
+            "ano_mes": pl.Int64,
+            "conta": pl.Utf8,
+            "nome_conta": pl.Utf8,
+            "saldo": pl.Float64,
+        })
+        result = compute_dre_subtotals(empty)
+        assert result.is_empty()
+        assert "ordering" in result.columns

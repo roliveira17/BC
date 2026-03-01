@@ -19,6 +19,23 @@ BALANCETES_KPI_MAP: dict[str, str] = {
     "Resultado Líquido": COSIF_RESULTADO_LIQUIDO,
 }
 
+# DRE account ordering for summarized COSIF 4040 DRE display
+DRE_ACCOUNT_ORDER: dict[str, int] = {
+    "7.1": 10,
+    "8.1": 20,
+    "RESULTADO BRUTO": 30,
+    "7.3": 40,
+    "7.5": 50,
+    "7.7": 60,
+    "8.3": 70,
+    "8.5": 80,
+    "8.7": 90,
+    "8.9": 100,
+    "RESULTADO OPERACIONAL": 110,
+    "7.9": 120,
+    "RESULTADO ANTES TRIBUTAÇÃO": 130,
+}
+
 
 def list_institutions(
     con: duckdb.DuckDBPyConnection,
@@ -296,6 +313,116 @@ def get_cosif_dre(
         ORDER BY a.ano_mes, a.conta
     """
     return con.execute(sql, [cod_conglomerado, cod_conglomerado]).pl()
+
+
+def get_cosif_dre_4040(
+    con: duckdb.DuckDBPyConnection,
+    cod_conglomerado: int,
+) -> pl.DataFrame:
+    """Build summarized DRE from COSIF 4040 data (level 2 accounts).
+
+    Joins balancetes_raw (documento='4040') with institution_mapping to
+    aggregate saldo across all individual institutions in the conglomerado.
+    Filters to COSIF level-2 accounts in groups 7 (receitas) and 8 (despesas).
+
+    Returns: DataFrame [ano_mes, conta, nome_conta, saldo]
+    """
+    sql = """
+        WITH agg AS (
+            SELECT
+                b.ano_mes,
+                LEFT(b.conta, LENGTH(b.conta) - 2) AS conta,
+                SUM(b.saldo) AS saldo
+            FROM balancetes_raw b
+            INNER JOIN institution_mapping m
+                ON b.cnpj8 = m.cnpj8
+            WHERE b.documento = '4040'
+              AND m.cod_conglomerado = ?
+              AND b.conta LIKE '_._.0.00.00-%'
+              AND (b.conta LIKE '7.%' OR b.conta LIKE '8.%')
+            GROUP BY b.ano_mes, LEFT(b.conta, LENGTH(b.conta) - 2)
+        ),
+        names AS (
+            SELECT
+                LEFT(b.conta, LENGTH(b.conta) - 2) AS conta,
+                FIRST(b.nome_conta ORDER BY b.ano_mes DESC) AS nome_conta
+            FROM balancetes_raw b
+            INNER JOIN institution_mapping m
+                ON b.cnpj8 = m.cnpj8
+            WHERE b.documento = '4040'
+              AND m.cod_conglomerado = ?
+              AND b.conta LIKE '_._.0.00.00-%'
+              AND (b.conta LIKE '7.%' OR b.conta LIKE '8.%')
+            GROUP BY LEFT(b.conta, LENGTH(b.conta) - 2)
+        )
+        SELECT a.ano_mes, a.conta, n.nome_conta, a.saldo
+        FROM agg a
+        INNER JOIN names n ON a.conta = n.conta
+        ORDER BY a.ano_mes, a.conta
+    """
+    return con.execute(sql, [cod_conglomerado, cod_conglomerado]).pl()
+
+
+def compute_dre_subtotals(dre_df: pl.DataFrame) -> pl.DataFrame:
+    """Add subtotal rows and ordering to a COSIF DRE DataFrame.
+
+    Computes per period:
+      - Resultado Bruto (7.1 + 8.1)
+      - Resultado Operacional (all except 7.9)
+      - Resultado antes da Tributação (all)
+
+    Returns: DataFrame [ano_mes, conta, nome_conta, saldo, ordering]
+    """
+    if dre_df.is_empty():
+        return dre_df.with_columns(pl.lit(0).alias("ordering"))
+
+    periods = dre_df["ano_mes"].unique().to_list()
+    subtotal_rows: list[dict[str, object]] = []
+
+    for period in periods:
+        period_df = dre_df.filter(pl.col("ano_mes") == period)
+
+        bruto = period_df.filter(
+            pl.col("conta").str.starts_with("7.1")
+            | pl.col("conta").str.starts_with("8.1")
+        )["saldo"].sum()
+        subtotal_rows.append({
+            "ano_mes": period,
+            "conta": "RESULTADO BRUTO",
+            "nome_conta": "= Resultado Bruto de Intermediação Financeira",
+            "saldo": bruto,
+        })
+
+        operacional = period_df.filter(
+            ~pl.col("conta").str.starts_with("7.9")
+        )["saldo"].sum()
+        subtotal_rows.append({
+            "ano_mes": period,
+            "conta": "RESULTADO OPERACIONAL",
+            "nome_conta": "= Resultado Operacional",
+            "saldo": operacional,
+        })
+
+        total = period_df["saldo"].sum()
+        subtotal_rows.append({
+            "ano_mes": period,
+            "conta": "RESULTADO ANTES TRIBUTAÇÃO",
+            "nome_conta": "= Resultado antes da Tributação",
+            "saldo": total,
+        })
+
+    subtotals = pl.DataFrame(subtotal_rows, schema=dre_df.schema)
+    combined = pl.concat([dre_df, subtotals])
+
+    combined = combined.with_columns(
+        pl.col("conta").map_elements(
+            lambda c: DRE_ACCOUNT_ORDER.get(
+                c, DRE_ACCOUNT_ORDER.get(c[:3], 999)
+            ),
+            return_dtype=pl.Int64,
+        ).alias("ordering")
+    )
+    return combined.sort(["ano_mes", "ordering"])
 
 
 def get_balancetes_top50(

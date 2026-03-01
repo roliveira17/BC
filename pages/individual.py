@@ -9,8 +9,10 @@ from dash import Input, Output, callback, dash_table, dcc, html
 
 from src.db import get_connection
 from src.queries import (
+    compute_dre_subtotals,
     get_capital_indicators,
     get_cosif_dre,
+    get_cosif_dre_4040,
     get_dre_indicators,
     get_institution_details,
     get_summary_indicators,
@@ -322,6 +324,89 @@ def _build_cosif_dre_table(cosif_df: pl.DataFrame) -> html.Div:
                         "textAlign": "left",
                         "fontWeight": "bold",
                         "minWidth": "350px",
+                    },
+                ],
+                sort_action="native",
+            ),
+        ]
+    )
+
+
+def _build_dre_resumida_table(dre_df: pl.DataFrame) -> html.Div:
+    """Build a pivoted DataTable from COSIF 4040 DRE data with subtotals."""
+    pivoted = dre_df.pivot(
+        on="ano_mes",
+        index=["conta", "nome_conta", "ordering"],
+        values="saldo",
+        aggregate_function="first",
+    ).sort("ordering")
+
+    period_cols = sorted(
+        c for c in pivoted.columns
+        if c not in ("conta", "nome_conta", "ordering")
+    )
+
+    pdf = pivoted.to_pandas()
+    pdf["indicador"] = pdf.apply(
+        lambda row: row["nome_conta"]
+        if str(row["conta"]).startswith("RESULTADO")
+        else f"{row['conta']} - {row['nome_conta']}",
+        axis=1,
+    )
+    pdf = pdf.drop(columns=["conta", "nome_conta", "ordering"])
+
+    for col in period_cols:
+        pdf[col] = pdf[col].apply(
+            lambda v: f"{v:,.0f}" if v is not None and v == v else ""
+        )
+
+    columns = [{"name": "Conta", "id": "indicador"}]
+    for col in period_cols:
+        columns.append({"name": str(col), "id": str(col)})
+
+    return html.Div(
+        [
+            html.H3(
+                "DRE Resumida — Balancete 4040 (COSIF)",
+                style={"marginTop": "24px", "marginBottom": "12px"},
+            ),
+            html.P(
+                "Contas nível 2 do Balancete 4040. "
+                "Grupo 7 = Receitas, Grupo 8 = Despesas.",
+                style={
+                    "color": "#666",
+                    "fontSize": "12px",
+                    "marginBottom": "8px",
+                },
+            ),
+            dash_table.DataTable(
+                data=pdf.to_dict("records"),
+                columns=columns,
+                page_size=30,
+                style_table={"overflowX": "auto"},
+                style_cell={
+                    "textAlign": "right",
+                    "padding": "6px 10px",
+                    "fontSize": "13px",
+                    "minWidth": "110px",
+                },
+                style_header={
+                    "fontWeight": "bold",
+                    "textAlign": "center",
+                },
+                style_data_conditional=[
+                    {
+                        "if": {"column_id": "indicador"},
+                        "textAlign": "left",
+                        "fontWeight": "bold",
+                        "minWidth": "350px",
+                    },
+                    {
+                        "if": {
+                            "filter_query": '{indicador} contains "="',
+                        },
+                        "fontWeight": "bold",
+                        "backgroundColor": "#f0f0f0",
                     },
                 ],
                 sort_action="native",
@@ -731,6 +816,12 @@ def render_institution_content(
     cosif_dre = get_cosif_dre(con, cod_conglomerado)
     if not cosif_dre.is_empty():
         tables.append(_build_cosif_dre_table(cosif_dre))
+
+    # COSIF 4040 summarized DRE (if available)
+    cosif_dre_4040 = get_cosif_dre_4040(con, cod_conglomerado)
+    if not cosif_dre_4040.is_empty():
+        dre_with_subtotals = compute_dre_subtotals(cosif_dre_4040)
+        tables.append(_build_dre_resumida_table(dre_with_subtotals))
 
     tables.append(
         html.Div(
