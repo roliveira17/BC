@@ -552,7 +552,8 @@ def get_balancetes_multi_kpi(
             MAX(CASE WHEN k.conta = ? THEN k.saldo END) AS depositos,
             MAX(CASE WHEN k.conta = ? THEN k.saldo END) AS resultado_liquido
         FROM top50 t
-        LEFT JOIN kpis k ON t.cod_conglomerado = k.cod_conglomerado
+        LEFT JOIN institution_mapping im ON t.cnpj8 = im.cnpj8
+        LEFT JOIN kpis k ON im.cod_conglomerado = k.cod_conglomerado
         GROUP BY t.rank, t.cnpj8, t.nome_inst,
                  t.cod_conglomerado, t.nome_conglomerado,
                  t.patrimonio_liquido
