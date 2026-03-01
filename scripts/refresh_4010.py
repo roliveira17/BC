@@ -4,8 +4,8 @@ Downloads individual institution 4010 balancetes from BCB for all institutions
 belonging to target conglomerados (default: Cora Peers).
 
 Usage:
-    python -m scripts.refresh_4010                    # Cora peers, last 8 quarters
-    python -m scripts.refresh_4010 --quarters 4       # Last 4 quarters
+    python -m scripts.refresh_4010                    # Cora peers, last 24 months
+    python -m scripts.refresh_4010 --months 12        # Last 12 months
     python -m scripts.refresh_4010 --all              # All mapped institutions
     python -m scripts.refresh_4010 --force            # Re-fetch cached periods
 """
@@ -97,35 +97,25 @@ def _filter_by_conglomerados(
     return [m for m in mappings if m["cod_conglomerado"] in target_codes]
 
 
-def _generate_quarter_periods(n_quarters: int) -> list[int]:
-    """Generate quarterly AAAAMM periods (3,6,9,12) working backwards.
+def _generate_monthly_periods(n_months: int) -> list[int]:
+    """Generate monthly AAAAMM periods working backwards from the latest available.
 
-    Uses 240-day lag (~8 months) because BCB publishes individual 4010 files
-    much later than consolidated reports (which use 75-day lag).
+    Uses 180-day lag (~6 months) because BCB publishes individual 4010 files
+    with a delay of approximately 5-6 months.
     """
     from datetime import date, timedelta
 
-    quarter_months = [3, 6, 9, 12]
-    reference = date.today() - timedelta(days=240)
+    reference = date.today() - timedelta(days=180)
     year = reference.year
     month = reference.month
 
-    available = [m for m in quarter_months if m <= month]
-    if available:
-        current_q_month = max(available)
-    else:
-        year -= 1
-        current_q_month = 12
-
     periods: list[int] = []
-    for _ in range(n_quarters):
-        periods.append(year * 100 + current_q_month)
-        idx = quarter_months.index(current_q_month)
-        if idx == 0:
+    for _ in range(n_months):
+        periods.append(year * 100 + month)
+        month -= 1
+        if month == 0:
+            month = 12
             year -= 1
-            current_q_month = 12
-        else:
-            current_q_month = quarter_months[idx - 1]
 
     return periods
 
@@ -136,7 +126,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="Refresh Balancetes 4010 (individual) in DuckDB")
     parser.add_argument(
-        "--quarters", type=int, default=8, help="Number of quarterly periods (default 8)"
+        "--months", type=int, default=24, help="Number of monthly periods (default 24)"
     )
     parser.add_argument(
         "--all", action="store_true", help="Fetch all mapped institutions (not just peers)"
@@ -182,8 +172,8 @@ def main() -> None:
         mode="all" if args.all else "cora_peers",
     )
 
-    # Step 4: Generate quarterly periods
-    periods = _generate_quarter_periods(args.quarters)
+    # Step 4: Generate monthly periods
+    periods = _generate_monthly_periods(args.months)
     logger.info("periods_to_fetch", periods=periods)
 
     # Step 5: Download and ingest 4010 for each institution × period

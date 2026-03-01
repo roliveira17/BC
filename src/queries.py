@@ -265,21 +265,37 @@ def get_cosif_dre(
     Returns: DataFrame [ano_mes, conta, nome_conta, saldo]
     """
     sql = """
-        SELECT
-            b.ano_mes,
-            b.conta,
-            b.nome_conta,
-            SUM(b.saldo) AS saldo
-        FROM balancetes_raw b
-        INNER JOIN institution_mapping m
-            ON b.cnpj8 = m.cnpj8
-        WHERE b.documento = '4010'
-          AND m.cod_conglomerado = ?
-          AND (b.conta LIKE '7.%' OR b.conta LIKE '8.%')
-        GROUP BY b.ano_mes, b.conta, b.nome_conta
-        ORDER BY b.ano_mes, b.conta
+        WITH agg AS (
+            SELECT
+                b.ano_mes,
+                LEFT(b.conta, LENGTH(b.conta) - 2) AS conta,
+                SUM(b.saldo) AS saldo
+            FROM balancetes_raw b
+            INNER JOIN institution_mapping m
+                ON b.cnpj8 = m.cnpj8
+            WHERE b.documento = '4010'
+              AND m.cod_conglomerado = ?
+              AND (b.conta LIKE '7.%' OR b.conta LIKE '8.%')
+            GROUP BY b.ano_mes, LEFT(b.conta, LENGTH(b.conta) - 2)
+        ),
+        names AS (
+            SELECT
+                LEFT(b.conta, LENGTH(b.conta) - 2) AS conta,
+                FIRST(b.nome_conta ORDER BY b.ano_mes DESC) AS nome_conta
+            FROM balancetes_raw b
+            INNER JOIN institution_mapping m
+                ON b.cnpj8 = m.cnpj8
+            WHERE b.documento = '4010'
+              AND m.cod_conglomerado = ?
+              AND (b.conta LIKE '7.%' OR b.conta LIKE '8.%')
+            GROUP BY LEFT(b.conta, LENGTH(b.conta) - 2)
+        )
+        SELECT a.ano_mes, a.conta, n.nome_conta, a.saldo
+        FROM agg a
+        INNER JOIN names n ON a.conta = n.conta
+        ORDER BY a.ano_mes, a.conta
     """
-    return con.execute(sql, [cod_conglomerado]).pl()
+    return con.execute(sql, [cod_conglomerado, cod_conglomerado]).pl()
 
 
 def get_balancetes_top50(
