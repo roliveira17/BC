@@ -172,42 +172,6 @@ def render_comparison(
             fig_bar.update_layout(height=max(300, len(latest) * 50))
             charts.append(dcc.Graph(figure=fig_bar))
 
-        # --- Statistics table ---
-        stats = (
-            comp_pandas.groupby("nome_conglomerado")["valor_a"]
-            .agg(["min", "max", "mean", "median", "last"])
-            .reset_index()
-        )
-        stats.columns = [
-            "Instituição",
-            "Mínimo",
-            "Máximo",
-            "Média",
-            "Mediana",
-            "Último",
-        ]
-        for col in ["Mínimo", "Máximo", "Média", "Mediana", "Último"]:
-            stats[col] = stats[col].round(2)
-
-        charts.append(
-            html.Div(
-                [
-                    html.H3(
-                        "Estatísticas Descritivas",
-                        style={"marginTop": "24px"},
-                    ),
-                    dash_table.DataTable(
-                        data=stats.to_dict("records"),
-                        columns=[{"name": c, "id": c} for c in stats.columns],
-                        style_table={"overflowX": "auto"},
-                        style_cell={"textAlign": "left", "padding": "8px"},
-                        style_header={"fontWeight": "bold"},
-                        sort_action="native",
-                    ),
-                ]
-            )
-        )
-
     # --- Segment ranking (all institutions) ---
     ranking_df = get_segment_ranking(con, indicator_name, relatorio)
     if not ranking_df.is_empty():
