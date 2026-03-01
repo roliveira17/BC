@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import dash
 import plotly.express as px
+import polars as pl
 from dash import Input, Output, callback, dash_table, dcc, html
 
 from src.db import get_connection
+from src.peers import PEER_GROUP_MAP
 from src.queries import (
     compare_institutions,
     compare_pl_trend,
@@ -109,9 +111,11 @@ def load_periods(_: str) -> tuple[list[dict[str, str | int]], int | None]:
     Output("cong-compare-select", "options"),
     Output("cong-mapping-store", "data"),
     Input("cong-period", "value"),
+    Input("peer-group-filter", "value"),
 )
 def render_summary_table(
     ano_mes: int | None,
+    peer_group: str,
 ) -> tuple[object, list[dict[str, str | int]], list[dict[str, str | int]], dict[str, str]]:
     empty_mapping: dict[str, str] = {}
     if ano_mes is None:
@@ -119,6 +123,10 @@ def render_summary_table(
         return msg, [], [], empty_mapping
 
     df = get_top50_enriched(con, ano_mes)
+    if peer_group != "ALL":
+        codes = PEER_GROUP_MAP.get(peer_group, [])
+        if codes:
+            df = df.filter(pl.col("cod_conglomerado").is_in(codes))
     if df.is_empty():
         msg = html.P(
             "Nenhum dado para o período selecionado.", style={"color": "#888"}

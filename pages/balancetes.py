@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import dash
 import plotly.express as px
+import polars as pl
 from dash import Input, Output, callback, dash_table, dcc, html
 
 from src.db import get_connection
+from src.peers import PEER_GROUP_MAP
 from src.queries import (
     BALANCETES_KPI_MAP,
     get_balancetes_kpi_trend,
@@ -118,9 +120,11 @@ def load_periods(_: str) -> tuple[list[dict[str, str | int]], int | None]:
     Output("balancetes-table", "children"),
     Output("balancetes-institution", "options"),
     Input("balancetes-period", "value"),
+    Input("peer-group-filter", "value"),
 )
 def render_top50(
     ano_mes: int | None,
+    peer_group: str,
 ) -> tuple[object, object, list[dict[str, str]]]:
     """Render bar chart and multi-KPI data table for Top 50."""
     if ano_mes is None:
@@ -132,6 +136,10 @@ def render_top50(
         return empty_msg, "", []
 
     df = get_balancetes_multi_kpi(con, ano_mes)
+    if peer_group != "ALL":
+        codes = PEER_GROUP_MAP.get(peer_group, [])
+        if codes:
+            df = df.filter(pl.col("cod_conglomerado").is_in(codes))
     if df.is_empty():
         empty_msg = html.P("Nenhum dado para o período selecionado.", style={"color": "#888"})
         return empty_msg, "", []
