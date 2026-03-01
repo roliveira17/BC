@@ -367,7 +367,7 @@ def _build_dre_resumida_table(dre_df: pl.DataFrame) -> html.Div:
     return html.Div(
         [
             html.H3(
-                "DRE Resumida — Balancete 4040 (COSIF)",
+                "DRE Resumida — Balancete 4010 (COSIF)",
                 style={"marginTop": "24px", "marginBottom": "12px"},
             ),
             html.P(

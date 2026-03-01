@@ -319,9 +319,9 @@ def get_cosif_dre_4040(
     con: duckdb.DuckDBPyConnection,
     cod_conglomerado: int,
 ) -> pl.DataFrame:
-    """Build summarized DRE from COSIF 4040 data (level 2 accounts).
+    """Build summarized DRE from COSIF 4010 data (level 2 accounts).
 
-    Joins balancetes_raw (documento='4040') with institution_mapping to
+    Joins balancetes_raw (documento='4010') with institution_mapping to
     aggregate saldo across all individual institutions in the conglomerado.
     Filters to COSIF level-2 accounts in groups 7 (receitas) and 8 (despesas).
 
@@ -336,9 +336,10 @@ def get_cosif_dre_4040(
             FROM balancetes_raw b
             INNER JOIN institution_mapping m
                 ON b.cnpj8 = m.cnpj8
-            WHERE b.documento = '4040'
+            WHERE b.documento = '4010'
               AND m.cod_conglomerado = ?
               AND b.conta LIKE '_._.0.00.00-%'
+              AND b.conta NOT LIKE '_.0.0.00.00-%'
               AND (b.conta LIKE '7.%' OR b.conta LIKE '8.%')
             GROUP BY b.ano_mes, LEFT(b.conta, LENGTH(b.conta) - 2)
         ),
@@ -349,9 +350,10 @@ def get_cosif_dre_4040(
             FROM balancetes_raw b
             INNER JOIN institution_mapping m
                 ON b.cnpj8 = m.cnpj8
-            WHERE b.documento = '4040'
+            WHERE b.documento = '4010'
               AND m.cod_conglomerado = ?
               AND b.conta LIKE '_._.0.00.00-%'
+              AND b.conta NOT LIKE '_.0.0.00.00-%'
               AND (b.conta LIKE '7.%' OR b.conta LIKE '8.%')
             GROUP BY LEFT(b.conta, LENGTH(b.conta) - 2)
         )
