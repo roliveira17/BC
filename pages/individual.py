@@ -344,7 +344,13 @@ def _build_dre_resumida_table(dre_df: pl.DataFrame) -> html.Div:
     period_cols = sorted(
         c for c in pivoted.columns
         if c not in ("conta", "nome_conta", "ordering")
+    )[-13:]
+
+    all_period_cols = sorted(
+        c for c in pivoted.columns
+        if c not in ("conta", "nome_conta", "ordering")
     )
+    drop_cols = [c for c in all_period_cols if c not in period_cols]
 
     pdf = pivoted.to_pandas()
     pdf["indicador"] = pdf.apply(
@@ -353,7 +359,7 @@ def _build_dre_resumida_table(dre_df: pl.DataFrame) -> html.Div:
         else f"{row['conta']} - {row['nome_conta']}",
         axis=1,
     )
-    pdf = pdf.drop(columns=["conta", "nome_conta", "ordering"])
+    pdf = pdf.drop(columns=["conta", "nome_conta", "ordering", *drop_cols])
 
     for col in period_cols:
         pdf[col] = pdf[col].apply(
