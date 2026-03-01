@@ -516,11 +516,17 @@ def get_balancetes_multi_kpi(
     params: list[int] = []
     if ano_mes is not None:
         top50_filter = "ano_mes = ?"
-        raw_filter = "ano_mes = ?"
+        raw_filter = (
+            "r.ano_mes = (SELECT MAX(ano_mes) FROM balancetes_raw"
+            " WHERE ano_mes <= ?)"
+        )
         params = [ano_mes, ano_mes]
     else:
         top50_filter = "ano_mes = (SELECT MAX(ano_mes) FROM balancetes_top50)"
-        raw_filter = "ano_mes = (SELECT MAX(ano_mes) FROM balancetes_top50)"
+        raw_filter = (
+            "r.ano_mes = (SELECT MAX(ano_mes) FROM balancetes_raw"
+            " WHERE ano_mes <= (SELECT MAX(ano_mes) FROM balancetes_top50))"
+        )
 
     sql = f"""
         WITH top50 AS (
@@ -530,11 +536,12 @@ def get_balancetes_multi_kpi(
             WHERE {top50_filter}
         ),
         kpis AS (
-            SELECT cnpj8, conta, SUM(saldo) AS saldo
-            FROM balancetes_raw
+            SELECT m.cod_conglomerado, r.conta, SUM(r.saldo) AS saldo
+            FROM balancetes_raw r
+            INNER JOIN institution_mapping m ON r.cnpj8 = m.cnpj8
             WHERE {raw_filter}
-              AND conta IN (?, ?, ?, ?)
-            GROUP BY cnpj8, conta
+              AND r.conta IN (?, ?, ?, ?)
+            GROUP BY m.cod_conglomerado, r.conta
         )
         SELECT
             t.rank, t.cnpj8, t.nome_inst,
@@ -545,7 +552,7 @@ def get_balancetes_multi_kpi(
             MAX(CASE WHEN k.conta = ? THEN k.saldo END) AS depositos,
             MAX(CASE WHEN k.conta = ? THEN k.saldo END) AS resultado_liquido
         FROM top50 t
-        LEFT JOIN kpis k ON t.cnpj8 = k.cnpj8
+        LEFT JOIN kpis k ON t.cod_conglomerado = k.cod_conglomerado
         GROUP BY t.rank, t.cnpj8, t.nome_inst,
                  t.cod_conglomerado, t.nome_conglomerado,
                  t.patrimonio_liquido
