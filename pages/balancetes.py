@@ -4,6 +4,7 @@ import dash
 import plotly.express as px
 import polars as pl
 from dash import Input, Output, callback, dash_table, dcc, html
+from dash.dash_table.Format import Format, Group, Scheme
 
 from src.db import get_connection
 from src.peers import PEER_GROUP_MAP
@@ -169,9 +170,11 @@ def render_top50(
     )
     bar_chart = dcc.Graph(figure=fig)
 
-    # Compute derived ratios
-    pdf["roe"] = pdf["resultado_liquido"] / pdf["patrimonio_liquido"]
-    pdf["roa"] = pdf["resultado_liquido"] / pdf["ativo_total"]
+    # Annualize resultado_liquido (YTD → 12-month) before computing ratios
+    mes = ano_mes % 100
+    fator_anual = 12.0 / mes
+    pdf["roe"] = (pdf["resultado_liquido"] * fator_anual) / pdf["patrimonio_liquido"]
+    pdf["roa"] = (pdf["resultado_liquido"] * fator_anual) / pdf["ativo_total"]
     pdf["alavancagem"] = pdf["ativo_total"] / pdf["patrimonio_liquido"]
 
     # Multi-KPI data table
@@ -184,10 +187,12 @@ def render_top50(
     table_df = pdf[
         ["rank", "nome_inst", "cnpj8", "cod_display", "nome_conglomerado"] + all_num_cols
     ].copy()
-    for col in saldo_cols:
-        table_df[col] = table_df[col].round(2)
     for col in ratio_cols:
-        table_df[col] = table_df[col].round(4)
+        table_df[col] = (table_df[col] * 100).round(1)
+
+    fmt_milhares = Format(group=Group.yes, scheme=Scheme.fixed, precision=0)
+    fmt_pct = Format(scheme=Scheme.fixed, precision=1)
+    fmt_alav = Format(scheme=Scheme.fixed, precision=2)
 
     table = dash_table.DataTable(
         data=table_df.to_dict("records"),
@@ -197,14 +202,14 @@ def render_top50(
             {"name": "CNPJ8", "id": "cnpj8"},
             {"name": "Cód. Congl.", "id": "cod_display"},
             {"name": "Conglomerado", "id": "nome_conglomerado"},
-            {"name": "PL (R$ mil)", "id": "patrimonio_liquido", "type": "numeric"},
-            {"name": "Ativo Total", "id": "ativo_total", "type": "numeric"},
-            {"name": "Op. Crédito", "id": "operacoes_credito", "type": "numeric"},
-            {"name": "Depósitos", "id": "depositos", "type": "numeric"},
-            {"name": "Resultado", "id": "resultado_liquido", "type": "numeric"},
-            {"name": "ROE", "id": "roe", "type": "numeric"},
-            {"name": "ROA", "id": "roa", "type": "numeric"},
-            {"name": "Alav.", "id": "alavancagem", "type": "numeric"},
+            {"name": "PL (R$ mil)", "id": "patrimonio_liquido", "type": "numeric", "format": fmt_milhares},
+            {"name": "Ativo Total", "id": "ativo_total", "type": "numeric", "format": fmt_milhares},
+            {"name": "Op. Crédito", "id": "operacoes_credito", "type": "numeric", "format": fmt_milhares},
+            {"name": "Depósitos", "id": "depositos", "type": "numeric", "format": fmt_milhares},
+            {"name": "Resultado", "id": "resultado_liquido", "type": "numeric", "format": fmt_milhares},
+            {"name": "ROE (%)", "id": "roe", "type": "numeric", "format": fmt_pct},
+            {"name": "ROA (%)", "id": "roa", "type": "numeric", "format": fmt_pct},
+            {"name": "Alav.", "id": "alavancagem", "type": "numeric", "format": fmt_alav},
         ],
         page_size=50,
         style_table={"overflowX": "auto"},
