@@ -179,7 +179,8 @@ class TestGetFinancialRatios:
         _seed_report1(db_con, 1, 202406, pl=1000.0, lucro=150.0)
         result = get_financial_ratios(db_con, 1)
         row = result.row(0, named=True)
-        assert row["roe"] == pytest.approx(15.0, rel=1e-6)
+        # 202406 = June H1, factor = 12/6 = 2 → 150*2/1000*100 = 30.0
+        assert row["roe"] == pytest.approx(30.0, rel=1e-6)
 
     def test_financial_ratios_roa_calculation(
         self, db_con: duckdb.DuckDBPyConnection
@@ -187,7 +188,8 @@ class TestGetFinancialRatios:
         _seed_report1(db_con, 1, 202406, ativo=10000.0, lucro=150.0)
         result = get_financial_ratios(db_con, 1)
         row = result.row(0, named=True)
-        assert row["roa"] == pytest.approx(1.5, rel=1e-6)
+        # 202406 = June H1, factor = 12/6 = 2 → 150*2/10000*100 = 3.0
+        assert row["roa"] == pytest.approx(3.0, rel=1e-6)
 
     def test_financial_ratios_loan_to_deposit(
         self, db_con: duckdb.DuckDBPyConnection
@@ -313,8 +315,9 @@ class TestGetRatioRanking:
         assert result.shape[0] == 3
         values = result["valor"].to_list()
         assert values[0] >= values[1] >= values[2]
-        assert values[0] == pytest.approx(30.0, rel=1e-6)
-        assert values[2] == pytest.approx(10.0, rel=1e-6)
+        # 202406 = June H1, factor = 2 → 300*2/1000*100=60, 100*2/1000*100=20
+        assert values[0] == pytest.approx(60.0, rel=1e-6)
+        assert values[2] == pytest.approx(20.0, rel=1e-6)
 
     def test_ratio_ranking_filters_nulls(
         self, db_con: duckdb.DuckDBPyConnection
@@ -348,8 +351,9 @@ class TestGetRatioRanking:
         result_q2 = get_ratio_ranking(db_con, "roe", 202406)
         assert result_q1.shape[0] == 1
         assert result_q2.shape[0] == 1
-        assert result_q1["valor"][0] == pytest.approx(10.0, rel=1e-6)
-        assert result_q2["valor"][0] == pytest.approx(20.0, rel=1e-6)
+        # factor=4 (Mar H1): 100*4/1000*100=40; factor=2 (Jun H1): 200*2/1000*100=40
+        assert result_q1["valor"][0] == pytest.approx(40.0, rel=1e-6)
+        assert result_q2["valor"][0] == pytest.approx(40.0, rel=1e-6)
 
 
 # ============================================================

@@ -14,6 +14,7 @@ from src.queries import (
     BALANCETES_KPI_MAP,
     COSIF_ATIVO_TOTAL,
     COSIF_DEPOSITOS,
+    COSIF_DESPESAS,
     COSIF_OPERACOES_CREDITO,
     COSIF_PATRIMONIO_LIQUIDO,
     COSIF_RESULTADO_LIQUIDO,
@@ -36,6 +37,7 @@ from src.queries import (
     get_top50_enriched,
     list_balancetes_periods,
     list_institutions,
+    semester_annualization_factor,
 )
 
 
@@ -334,7 +336,22 @@ class TestBalancetesPeriods:
 
 
 def _seed_multi_kpi(con: duckdb.DuckDBPyConnection) -> None:
-    """Seed balancetes with multiple COSIF accounts for multi-KPI tests."""
+    """Seed balancetes + IF.data bridge for multi-KPI tests."""
+    # Cadastro bridge: cnpj8 → cod_conglomerado (needed by _compute_and_insert_top50)
+    ingest_cadastro(
+        con,
+        [_institution(1, 10, "S1"), _institution(2, 20, "S2")],
+        202501,
+    )
+    con.execute(
+        "UPDATE cadastro SET cnpj = '11111111000100' "
+        "WHERE cod_conglomerado = 1 AND ano_mes = 202501"
+    )
+    con.execute(
+        "UPDATE cadastro SET cnpj = '22222222000100' "
+        "WHERE cod_conglomerado = 2 AND ano_mes = 202501"
+    )
+
     for ano_mes in [202501, 202502]:
         rows = [
             # PL (6.0.0.00.00-2)
@@ -359,13 +376,32 @@ def _seed_multi_kpi(con: duckdb.DuckDBPyConnection) -> None:
                 cnpj="11111111000100", saldo=12000000.0,
                 conta=COSIF_DEPOSITOS, ano_mes=ano_mes,
             ),
-            # Resultado Líquido (7.0.0.00.00-9)
+            # Resultado Líquido — Receitas (7.0.0.00.00-9)
             _balancete_row(
-                cnpj="11111111000100", saldo=500000.0,
+                cnpj="11111111000100", saldo=800000.0,
                 conta=COSIF_RESULTADO_LIQUIDO, ano_mes=ano_mes,
+            ),
+            # Resultado Líquido — Despesas (8.0.0.00.00-6)
+            _balancete_row(
+                cnpj="11111111000100", saldo=-300000.0,
+                conta=COSIF_DESPESAS, ano_mes=ano_mes,
             ),
         ]
         ingest_balancetes(con, rows, ano_mes)
+
+    # IF.data Report 1 values for cod_conglomerado=1 (institution 11111111)
+    for ano_mes in [202501, 202502]:
+        ingest_report_values(
+            con,
+            [
+                _report_val(1, 20000000.0, "Ativo Total"),
+                _report_val(1, 8000000.0, "Carteira de Crédito"),
+                _report_val(1, 12000000.0, "Captações"),
+                _report_val(1, 500000.0, "Lucro Líquido"),
+            ],
+            ano_mes,
+            "1",
+        )
 
 
 # --- Combined (Balancetes + IF.data) Query Tests ---
@@ -552,8 +588,9 @@ class TestBalancetesRatioTrend:
         _seed_multi_kpi(db_con)
         result = get_balancetes_ratio_trend(db_con, "11111111")
         row = result.row(0, named=True)
-        # ROE = resultado / PL = 500000 / 5000000 = 0.1
-        assert abs(row["roe"] - 0.1) < 1e-9
+        # resultado = 800k - 300k = 500k, period 202501 (Jan H1, factor=12)
+        # ROE = 500000 * 12 / 5000000 = 1.2
+        assert abs(row["roe"] - 1.2) < 1e-9
 
     def test_computes_roa_correctly(
         self, db_con: duckdb.DuckDBPyConnection
@@ -561,8 +598,9 @@ class TestBalancetesRatioTrend:
         _seed_multi_kpi(db_con)
         result = get_balancetes_ratio_trend(db_con, "11111111")
         row = result.row(0, named=True)
-        # ROA = resultado / ativo = 500000 / 20000000 = 0.025
-        assert abs(row["roa"] - 0.025) < 1e-9
+        # resultado = 800k - 300k = 500k, period 202501 (Jan H1, factor=12)
+        # ROA = 500000 * 12 / 20000000 = 0.3
+        assert abs(row["roa"] - 0.3) < 1e-9
 
     def test_computes_alavancagem_correctly(
         self, db_con: duckdb.DuckDBPyConnection
@@ -935,3 +973,23 @@ class TestComputeDreSubtotals:
         result = compute_dre_subtotals(empty)
         assert result.is_empty()
         assert "ordering" in result.columns
+
+
+class TestSemesterAnnualizationFactor:
+    def test_january_h1(self) -> None:
+        assert semester_annualization_factor(202501) == 12.0
+
+    def test_march_h1(self) -> None:
+        assert semester_annualization_factor(202503) == 4.0
+
+    def test_june_h1(self) -> None:
+        assert semester_annualization_factor(202506) == 2.0
+
+    def test_july_h2(self) -> None:
+        assert semester_annualization_factor(202507) == 12.0
+
+    def test_september_h2(self) -> None:
+        assert semester_annualization_factor(202509) == 4.0
+
+    def test_december_h2(self) -> None:
+        assert semester_annualization_factor(202512) == 2.0

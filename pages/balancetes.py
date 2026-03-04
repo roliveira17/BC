@@ -15,6 +15,7 @@ from src.queries import (
     get_balancetes_ratio_trend,
     get_balancetes_trend,
     list_balancetes_periods,
+    semester_annualization_factor,
 )
 from src.settings import Settings
 
@@ -170,9 +171,7 @@ def render_top50(
     )
     bar_chart = dcc.Graph(figure=fig)
 
-    # Annualize resultado_liquido (YTD → 12-month) before computing ratios
-    mes = ano_mes % 100
-    fator_anual = 12.0 / mes
+    fator_anual = semester_annualization_factor(ano_mes)
     pdf["roe"] = (pdf["resultado_liquido"] * fator_anual) / pdf["patrimonio_liquido"]
     pdf["roa"] = (pdf["resultado_liquido"] * fator_anual) / pdf["ativo_total"]
     pdf["alavancagem"] = pdf["ativo_total"] / pdf["patrimonio_liquido"]

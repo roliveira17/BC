@@ -7,6 +7,7 @@ import polars as pl
 COSIF_PATRIMONIO_LIQUIDO = "6.0.0.00.00-2"
 COSIF_ATIVO_TOTAL = "1.0.0.00.00-7"
 COSIF_RESULTADO_LIQUIDO = "7.0.0.00.00-9"
+COSIF_DESPESAS = "8.0.0.00.00-6"
 COSIF_OPERACOES_CREDITO = "1.6.0.00.00-1"
 COSIF_DEPOSITOS = "4.1.0.00.00-7"
 
@@ -35,6 +36,17 @@ DRE_ACCOUNT_ORDER: dict[str, int] = {
     "7.9": 120,
     "RESULTADO ANTES TRIBUTAÇÃO": 130,
 }
+
+
+def semester_annualization_factor(ano_mes: int) -> float:
+    """Return the factor to annualize semester-accumulated COSIF/IF.data values.
+
+    Brazilian banking DRE data accumulates per fiscal semester (Jan-Jun, Jul-Dec),
+    resetting in July. Factor = 12 / months_elapsed_in_semester.
+    """
+    mes = ano_mes % 100
+    mes_no_semestre = mes - 6 if mes > 6 else mes
+    return 12.0 / mes_no_semestre
 
 
 def list_institutions(
@@ -597,10 +609,10 @@ def get_balancetes_ratio_trend(
             ano_mes,
             SUM(CASE WHEN conta = ? THEN saldo END) AS patrimonio_liquido,
             SUM(CASE WHEN conta = ? THEN saldo END) AS ativo_total,
-            SUM(CASE WHEN conta = ? THEN saldo END) AS resultado_liquido
+            SUM(CASE WHEN conta IN (?, ?) THEN saldo END) AS resultado_liquido
         FROM balancetes_raw
         WHERE cnpj8 = ?
-          AND conta IN (?, ?, ?)
+          AND conta IN (?, ?, ?, ?)
         GROUP BY ano_mes
         ORDER BY ano_mes
     """
@@ -608,10 +620,12 @@ def get_balancetes_ratio_trend(
         COSIF_PATRIMONIO_LIQUIDO,
         COSIF_ATIVO_TOTAL,
         COSIF_RESULTADO_LIQUIDO,
+        COSIF_DESPESAS,
         cnpj8,
         COSIF_PATRIMONIO_LIQUIDO,
         COSIF_ATIVO_TOTAL,
         COSIF_RESULTADO_LIQUIDO,
+        COSIF_DESPESAS,
     ]
     df = con.execute(sql, params).pl()
     if df.is_empty():
@@ -620,9 +634,13 @@ def get_balancetes_ratio_trend(
             pl.lit(None, dtype=pl.Float64).alias("roa"),
             pl.lit(None, dtype=pl.Float64).alias("alavancagem"),
         )
+    mes = pl.col("ano_mes") % 100
+    mes_no_sem = pl.when(mes > 6).then(mes - 6).otherwise(mes)
+    fator = pl.lit(12.0) / mes_no_sem
+    resultado_anual = pl.col("resultado_liquido") * fator
     return df.with_columns(
-        (pl.col("resultado_liquido") / pl.col("patrimonio_liquido")).alias("roe"),
-        (pl.col("resultado_liquido") / pl.col("ativo_total")).alias("roa"),
+        (resultado_anual / pl.col("patrimonio_liquido")).alias("roe"),
+        (resultado_anual / pl.col("ativo_total")).alias("roa"),
         (pl.col("ativo_total") / pl.col("patrimonio_liquido")).alias("alavancagem"),
     )
 
@@ -746,6 +764,9 @@ def get_financial_ratios(
         p1 AS (
             SELECT
                 ano_mes,
+                12.0 / (CASE WHEN ano_mes % 100 > 6
+                             THEN ano_mes % 100 - 6
+                             ELSE ano_mes % 100 END) AS fator_anual,
                 MAX(CASE WHEN nome_linha LIKE '%ucro L%' THEN valor_a END)
                     AS lucro_liquido,
                 MAX(CASE WHEN nome_linha LIKE '%atrim%nio L%'
@@ -810,10 +831,11 @@ def get_financial_ratios(
         )
         SELECT
             COALESCE(p1.ano_mes, p5.ano_mes, p4.ano_mes) AS ano_mes,
-            CASE WHEN p1.pl != 0 THEN p1.lucro_liquido / p1.pl * 100 END
+            CASE WHEN p1.pl != 0
+                THEN p1.lucro_liquido * p1.fator_anual / p1.pl * 100 END
                 AS roe,
             CASE WHEN p1.ativo_total != 0
-                THEN p1.lucro_liquido / p1.ativo_total * 100 END
+                THEN p1.lucro_liquido * p1.fator_anual / p1.ativo_total * 100 END
                 AS roa,
             CASE WHEN p1.captacoes != 0
                 THEN p1.carteira_credito / p1.captacoes * 100 END
@@ -895,11 +917,18 @@ def get_ratio_ranking(
         period_clause = "rv.ano_mes = (SELECT MAX(ano_mes) FROM report_values)"
 
     # Build ratio expression based on ratio_name
+    # SQL equivalent of semester_annualization_factor() for use inside GROUP BY
+    _sql_annual = (
+        "(12.0 / (CASE WHEN MAX(rv.ano_mes) % 100 > 6 "
+        "THEN MAX(rv.ano_mes) % 100 - 6 "
+        "ELSE MAX(rv.ano_mes) % 100 END))"
+    )
+    _lucro = "MAX(CASE WHEN rv.nome_linha LIKE '%ucro L%' THEN rv.valor_a END)"
     ratio_expressions = {
         "roe": (
             "CASE WHEN MAX(CASE WHEN rv.nome_linha LIKE '%atrim%nio L%' "
             "AND rv.nome_linha NOT LIKE '%efer%' THEN rv.valor_a END) != 0 "
-            "THEN MAX(CASE WHEN rv.nome_linha LIKE '%ucro L%' THEN rv.valor_a END) "
+            f"THEN {_lucro} * {_sql_annual} "
             "/ MAX(CASE WHEN rv.nome_linha LIKE '%atrim%nio L%' "
             "AND rv.nome_linha NOT LIKE '%efer%' THEN rv.valor_a END) * 100 END",
             "'1'",
@@ -907,7 +936,7 @@ def get_ratio_ranking(
         "roa": (
             "CASE WHEN MAX(CASE WHEN rv.nome_linha = 'Ativo Total' "
             "THEN rv.valor_a END) != 0 "
-            "THEN MAX(CASE WHEN rv.nome_linha LIKE '%ucro L%' THEN rv.valor_a END) "
+            f"THEN {_lucro} * {_sql_annual} "
             "/ MAX(CASE WHEN rv.nome_linha = 'Ativo Total' "
             "THEN rv.valor_a END) * 100 END",
             "'1'",
