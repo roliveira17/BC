@@ -23,34 +23,26 @@ from src.log import configure_logging
 from src.settings import Settings
 
 
-def main() -> None:
-    configure_logging()
+def run_refresh(quarters: int | None = None, force: bool = False) -> None:
+    """Fetch IF.data reports and populate DuckDB.
+
+    Can be called programmatically (from seed.py) or via CLI.
+    """
     logger = structlog.get_logger()
 
-    parser = argparse.ArgumentParser(description="Refresh IF.data cache in DuckDB")
-    parser.add_argument(
-        "--quarters", type=int, default=None, help="Override number of quarters"
-    )
-    parser.add_argument(
-        "--force", action="store_true", help="Re-fetch even if cached"
-    )
-    args = parser.parse_args()
-
     settings = Settings()
-    quarters = args.quarters or settings.history_quarters
+    quarters = quarters or settings.history_quarters
 
     con = get_connection(settings.duckdb_path)
 
     with IFDataClient(settings) as client:
-        # Use real available periods from the API instead of generated dates
         all_periods = client.list_periods()
         periods = all_periods[:quarters]
 
         logger.info("refresh_starting", quarters=quarters, periods=periods)
 
         for ano_mes in periods:
-            # Fetch and ingest cadastro
-            if args.force or not is_period_fetched(con, ano_mes, "cadastro"):
+            if force or not is_period_fetched(con, ano_mes, "cadastro"):
                 try:
                     cadastro = client.fetch_cadastro(ano_mes)
                     count = ingest_cadastro(con, cadastro, ano_mes)
@@ -63,9 +55,8 @@ def main() -> None:
             else:
                 logger.info("cadastro_cached", ano_mes=ano_mes)
 
-            # Fetch and ingest each report type
             for relatorio in settings.ifdata_relatorios:
-                if not args.force and is_period_fetched(con, ano_mes, relatorio):
+                if not force and is_period_fetched(con, ano_mes, relatorio):
                     logger.info(
                         "report_cached", ano_mes=ano_mes, relatorio=relatorio
                     )
@@ -90,7 +81,6 @@ def main() -> None:
                     )
                     continue
 
-            # Derive Top 50 from IF.data report values
             try:
                 top50_count = compute_top50_from_ifdata(con, ano_mes)
                 logger.info("top50_done", ano_mes=ano_mes, rows=top50_count)
@@ -99,6 +89,21 @@ def main() -> None:
 
     con.close()
     logger.info("refresh_complete", periods_attempted=len(periods))
+
+
+def main() -> None:
+    configure_logging()
+
+    parser = argparse.ArgumentParser(description="Refresh IF.data cache in DuckDB")
+    parser.add_argument(
+        "--quarters", type=int, default=None, help="Override number of quarters"
+    )
+    parser.add_argument(
+        "--force", action="store_true", help="Re-fetch even if cached"
+    )
+    args = parser.parse_args()
+
+    run_refresh(quarters=args.quarters, force=args.force)
 
 
 if __name__ == "__main__":
