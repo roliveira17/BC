@@ -120,24 +120,20 @@ def _generate_monthly_periods(n_months: int) -> list[int]:
     return periods
 
 
-def main() -> None:
-    configure_logging()
-    logger = structlog.get_logger()
+def run_refresh_4010(
+    months: int = 24,
+    all_institutions: bool = False,
+    force: bool = False,
+) -> None:
+    """Fetch Balancetes 4010 (individual) and populate DuckDB.
 
-    parser = argparse.ArgumentParser(description="Refresh Balancetes 4010 (individual) in DuckDB")
-    parser.add_argument(
-        "--months", type=int, default=24, help="Number of monthly periods (default 24)"
-    )
-    parser.add_argument(
-        "--all", action="store_true", help="Fetch all mapped institutions (not just peers)"
-    )
-    parser.add_argument("--force", action="store_true", help="Re-fetch even if cached")
-    args = parser.parse_args()
+    Can be called programmatically (from seed.py) or via CLI.
+    """
+    logger = structlog.get_logger()
 
     settings = Settings()
     con = get_connection(settings.duckdb_path)
 
-    # Step 1: Fetch individual institution cadastro from IF.data
     logger.info("fetching_individual_cadastro")
     with IFDataClient(settings) as ifdata_client:
         all_periods = ifdata_client.list_periods()
@@ -151,13 +147,11 @@ def main() -> None:
             logger.error("no_cadastro_1006", period=latest_period)
             return
 
-    # Step 2: Build and ingest CNPJ8 -> cod_conglomerado mapping
     all_mappings = _build_mapping(raw_entries)
     ingest_institution_mapping(con, all_mappings)
     logger.info("mapping_complete", total_institutions=len(all_mappings))
 
-    # Step 3: Filter to target institutions
-    if args.all:
+    if all_institutions:
         target_mappings = all_mappings
     else:
         from app import CORA_PEERS_CODES
@@ -169,14 +163,12 @@ def main() -> None:
     logger.info(
         "target_institutions",
         count=len(cnpj8_list),
-        mode="all" if args.all else "cora_peers",
+        mode="all" if all_institutions else "cora_peers",
     )
 
-    # Step 4: Generate monthly periods
-    periods = _generate_monthly_periods(args.months)
+    periods = _generate_monthly_periods(months)
     logger.info("periods_to_fetch", periods=periods)
 
-    # Step 5: Download and ingest 4010 for each institution × period
     total_downloads = len(cnpj8_list) * len(periods)
     success_count = 0
     skip_count = 0
@@ -189,7 +181,7 @@ def main() -> None:
         for period_idx, ano_mes in enumerate(periods):
             all_rows: list[BalanceteRow] = []
 
-            if not args.force and is_period_fetched(con, ano_mes, "4010"):
+            if not force and is_period_fetched(con, ano_mes, "4010"):
                 logger.info("4010_period_cached", ano_mes=ano_mes)
                 skip_count += len(cnpj8_list)
                 continue
@@ -226,7 +218,6 @@ def main() -> None:
 
                 time.sleep(_REQUEST_DELAY)
 
-            # Ingest all rows for this period
             if all_rows:
                 count = ingest_4010_batch(con, all_rows, ano_mes)
                 logger.info(
@@ -241,6 +232,26 @@ def main() -> None:
         success=success_count,
         skipped=skip_count,
         failed=fail_count,
+    )
+
+
+def main() -> None:
+    configure_logging()
+
+    parser = argparse.ArgumentParser(description="Refresh Balancetes 4010 (individual) in DuckDB")
+    parser.add_argument(
+        "--months", type=int, default=24, help="Number of monthly periods (default 24)"
+    )
+    parser.add_argument(
+        "--all", action="store_true", help="Fetch all mapped institutions (not just peers)"
+    )
+    parser.add_argument("--force", action="store_true", help="Re-fetch even if cached")
+    args = parser.parse_args()
+
+    run_refresh_4010(
+        months=args.months,
+        all_institutions=args.all,
+        force=args.force,
     )
 
 
