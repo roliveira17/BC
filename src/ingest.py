@@ -136,6 +136,55 @@ def ingest_report_values(
     return len(rows)
 
 
+def _build_conta_check_digit_map(
+    con: duckdb.DuckDBPyConnection,
+) -> dict[str, str]:
+    """Build mapping from '-0' check digit contas to standard COSIF check digits.
+
+    BCB changed the CSV format in Jan/2025: all check digits became '-0'.
+    This function builds a lookup from pre-2025 data to restore standard digits.
+    Falls back to hardcoded mapping for critical accounts when no DB data exists.
+    """
+    from src.queries import (
+        COSIF_ATIVO_TOTAL,
+        COSIF_DEPOSITOS,
+        COSIF_DESPESAS,
+        COSIF_OPERACOES_CREDITO,
+        COSIF_PATRIMONIO_LIQUIDO,
+        COSIF_RESULTADO_LIQUIDO,
+    )
+
+    fallback = {
+        "6.0.0.00.00-0": COSIF_PATRIMONIO_LIQUIDO,
+        "1.0.0.00.00-0": COSIF_ATIVO_TOTAL,
+        "7.0.0.00.00-0": COSIF_RESULTADO_LIQUIDO,
+        "8.0.0.00.00-0": COSIF_DESPESAS,
+        "1.6.0.00.00-0": COSIF_OPERACOES_CREDITO,
+        "4.1.0.00.00-0": COSIF_DEPOSITOS,
+    }
+    rows = con.execute("""
+        SELECT DISTINCT
+            SUBSTRING(conta, 1, LENGTH(conta) - 2) || '-0' AS zero_conta,
+            conta AS standard_conta
+        FROM balancetes_raw
+        WHERE conta NOT LIKE '%-0'
+    """).fetchall()
+    db_map = {zero: standard for zero, standard in rows}
+    return fallback | db_map
+
+
+def _normalize_conta_column(
+    df: pl.DataFrame,
+    mapping: dict[str, str],
+) -> pl.DataFrame:
+    """Replace '-0' check digit contas with standard COSIF check digits."""
+    if not mapping:
+        return df
+    return df.with_columns(
+        pl.col("conta").replace(mapping).alias("conta"),
+    )
+
+
 def _compute_and_insert_top50(con: duckdb.DuckDBPyConnection, ano_mes: int) -> int:
     """Compute Top 50 by PL from balancetes_raw and insert into balancetes_top50.
 
@@ -249,7 +298,9 @@ def ingest_balancetes(
         }
         for r in records
     ]
-    df = pl.DataFrame(rows)  # noqa: F841 — referenced by DuckDB SQL
+    df = pl.DataFrame(rows)
+    mapping = _build_conta_check_digit_map(con)
+    df = _normalize_conta_column(df, mapping)  # noqa: F841 — referenced by DuckDB SQL
 
     con.execute("DELETE FROM balancetes_raw WHERE ano_mes = ?", [ano_mes])
     con.execute("INSERT INTO balancetes_raw SELECT * FROM df")
@@ -286,7 +337,9 @@ def ingest_4010_batch(
         }
         for r in records
     ]
-    df = pl.DataFrame(rows)  # noqa: F841 — referenced by DuckDB SQL
+    df = pl.DataFrame(rows)
+    mapping = _build_conta_check_digit_map(con)
+    df = _normalize_conta_column(df, mapping)  # noqa: F841 — referenced by DuckDB SQL
 
     con.execute(
         "DELETE FROM balancetes_raw WHERE ano_mes = ? AND documento = '4010'",
@@ -300,6 +353,44 @@ def ingest_4010_batch(
     )
     logger.info("ingested_4010", ano_mes=ano_mes, rows=len(rows))
     return len(rows)
+
+
+def migrate_normalize_cosif_check_digits(
+    con: duckdb.DuckDBPyConnection,
+) -> int:
+    """One-time migration: normalize '-0' check digits in existing balancetes_raw data.
+
+    BCB changed CSV format in Jan/2025 — all check digits became '-0'.
+    This restores standard COSIF check digits using a mapping from pre-2025 data.
+    Also recomputes balancetes_top50 for affected monthly periods.
+    """
+    mapping = _build_conta_check_digit_map(con)
+    if not mapping:
+        logger.info("migrate_check_digits_skipped", reason="no mapping available")
+        return 0
+
+    total_updated = 0
+    for zero_conta, standard_conta in mapping.items():
+        result = con.execute(
+            "UPDATE balancetes_raw SET conta = ? WHERE conta = ?",
+            [standard_conta, zero_conta],
+        )
+        count = result.fetchone()[0] if result else 0
+        if count > 0:
+            total_updated += count
+
+    logger.info("migrate_check_digits_done", rows_updated=total_updated)
+
+    # Recompute top50 for monthly periods that had '-0' data
+    periods = con.execute("""
+        SELECT DISTINCT ano_mes FROM balancetes_raw
+        WHERE ano_mes >= 202501
+        ORDER BY ano_mes
+    """).fetchall()
+    for (ano_mes,) in periods:
+        _compute_and_insert_top50(con, ano_mes)
+
+    return total_updated
 
 
 def ingest_institution_mapping(
