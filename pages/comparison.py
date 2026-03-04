@@ -133,22 +133,33 @@ def render_comparison(
     comp_df = compare_institutions(con, cod_conglomerados, indicator_name, relatorio)
     if not comp_df.is_empty():
         comp_pandas = comp_df.to_pandas()
+        comp_pandas["ano_mes"] = comp_pandas["ano_mes"].astype(int)
+        comp_pandas = comp_pandas.sort_values("ano_mes")
 
-        fig_lines = px.line(
+        meses = [
+            "Jan", "Fev", "Mar", "Abr", "Mai", "Jun",
+            "Jul", "Ago", "Set", "Out", "Nov", "Dez",
+        ]
+        comp_pandas["periodo"] = comp_pandas["ano_mes"].apply(
+            lambda v: f"{meses[(v % 100) - 1]}/{str(v // 100)[-2:]}"
+        )
+        periodos_ordenados = comp_pandas["periodo"].unique().tolist()
+
+        fig_bars = px.bar(
             comp_pandas,
-            x="ano_mes",
+            x="periodo",
             y="valor_a",
             color="nome_conglomerado",
             title=f"{indicator_name} — Evolução Comparada",
             labels={
-                "ano_mes": "Período",
+                "periodo": "Período",
                 "valor_a": "Valor",
                 "nome_conglomerado": "Instituição",
             },
-            markers=True,
+            category_orders={"periodo": periodos_ordenados},
         )
-        fig_lines.update_layout(height=450)
-        charts.append(dcc.Graph(figure=fig_lines))
+        fig_bars.update_layout(height=450, barmode="group")
+        charts.append(dcc.Graph(figure=fig_bars))
 
         # --- Bar chart: latest period ranking ---
         latest_period = comp_pandas["ano_mes"].max()
